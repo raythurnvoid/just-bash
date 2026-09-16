@@ -823,6 +823,11 @@ async function expandPart(
       ctx.state.suppressVerbose = true;
       // `$(cmd &)` launches inside the substitution; its `$!` stays there
       const savedLastBackgroundPid = ctx.state.lastBackgroundPid;
+      // The body's stdout is the substitution value, never live output
+      const releaseCapture = ctx.executionScope.captureOutput({
+        stdout: true,
+        stderr: false,
+      });
       try {
         const result = await ctx.executeScript(part.body);
         // Restore environment but preserve exit code
@@ -889,6 +894,8 @@ async function expandPart(
           return exitOutput;
         }
         throw error;
+      } finally {
+        releaseCapture();
       }
     }
 

@@ -37,6 +37,18 @@ export interface CommandExecutionBudget {
 type Cleanup = () => void | Promise<void>;
 const OUTPUT_RELEASE_AUTHORITY = Object.freeze(Object.create(null) as object);
 
+export type OutputStream = "stdout" | "stderr";
+
+/**
+ * Host hook for live output. It receives the text of each statement as the
+ * statement finishes, decoded like the final result, and every byte once:
+ * a loop body, eval, a function or a nested exec hands over its own
+ * statements and the enclosing statement only relays them. Text that only
+ * the final result carries: an xtrace line of a relaying command, error text
+ * a compound command appends, and the output an abort or a limit cuts off.
+ */
+export type LiveOutputHook = (stream: OutputStream, text: string) => void;
+
 /**
  * Security-sensitive accounting shared by every interpreter descended from a
  * single public Bash.exec() call. This object is never accepted from callers;
@@ -58,6 +70,10 @@ export class ExecutionScope {
   private poisoned: ExecutionLimitError | ExecutionAbortedError | undefined;
   private closed = false;
   private readonly startedAt = Date.now();
+  // Live output shared by every interpreter of this exec, so a nested exec
+  // inside `$(...)` stays silent like the substitution around it.
+  private readonly liveOutputBytes = { stdout: 0, stderr: 0 };
+  private readonly captureDepth = { stdout: 0, stderr: 0 };
 
   /** Bytes still available for prospective intermediate allocations. */
   get remainingLiveBytes(): number {
@@ -69,10 +85,46 @@ export class ExecutionScope {
     return this.outputBytes;
   }
 
+  /**
+   * UTF-16 units handed to the live output hook so far, per stream. A
+   * statement compares this before and after a pipeline to see whether the
+   * statements inside the pipeline already streamed their output.
+   */
+  get liveOutputUnits(): { stdout: number; stderr: number } {
+    return { ...this.liveOutputBytes };
+  }
+
   constructor(
     private readonly limits: Required<ExecutionLimits>,
     private readonly signal: AbortSignal | undefined = undefined,
+    private readonly onOutput: LiveOutputHook | undefined = undefined,
   ) {}
+
+  /** Hand text to the live output hook, unless a capture is open on the stream. */
+  emitOutput(stream: OutputStream, text: string): void {
+    if (text === "" || !this.onOutput || this.captureDepth[stream] > 0) return;
+    this.liveOutputBytes[stream] += text.length;
+    this.onOutput(stream, text);
+  }
+
+  /**
+   * Silence the live output hook for the given streams until the returned
+   * function runs: `$(...)` and a non-last pipeline stage keep their stdout,
+   * and a compound command whose redirections point a stream elsewhere keeps
+   * that stream. A captured emit is not counted, so the enclosing statement
+   * still hands over what reaches it.
+   */
+  captureOutput(streams: { stdout: boolean; stderr: boolean }): () => void {
+    if (streams.stdout) this.captureDepth.stdout += 1;
+    if (streams.stderr) this.captureDepth.stderr += 1;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      if (streams.stdout) this.captureDepth.stdout -= 1;
+      if (streams.stderr) this.captureDepth.stderr -= 1;
+    };
+  }
 
   private fail(error: ExecutionLimitError | ExecutionAbortedError): never {
     this.poisoned ??= error;

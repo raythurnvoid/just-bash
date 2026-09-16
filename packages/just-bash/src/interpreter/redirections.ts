@@ -1049,6 +1049,45 @@ export async function routeControlFlowError(
   };
 }
 
+/**
+ * The standard streams a redirection list points away from the caller:
+ * `> f`, `2> f`, `&> f`, `>&2`, `2>&1`. Read from the operators alone, so a
+ * no-op like `>&1` counts too; that only silences live output the final
+ * result still carries.
+ */
+function redirectedOutputStreams(redirections: RedirectionNode[]): {
+  stdout: boolean;
+  stderr: boolean;
+} {
+  const streams = { stdout: false, stderr: false };
+  for (const redir of redirections) {
+    if (redir.fdVariable) continue;
+    switch (redir.operator) {
+      case "&>":
+      case "&>>":
+        streams.stdout = true;
+        streams.stderr = true;
+        break;
+      case ">":
+      case ">>":
+      case ">|":
+      case ">&": {
+        const fd = redir.fd ?? 1;
+        if (fd === 1) streams.stdout = true;
+        if (fd === 2) streams.stderr = true;
+        break;
+      }
+      case "<>":
+        if (redir.fd === 1) streams.stdout = true;
+        if (redir.fd === 2) streams.stderr = true;
+        break;
+      default:
+        break;
+    }
+  }
+  return streams;
+}
+
 export async function withPreparedRedirections(
   ctx: InterpreterContext,
   redirections: RedirectionNode[],
@@ -1070,6 +1109,12 @@ export async function withPreparedRedirections(
       ctx.state.groupStdin = prepared.stdin;
       ctx.state.groupStdinSourceFd = prepared.stdinSourceFd;
     }
+    // The statements inside the body stream their own output. A stream the
+    // body's redirections send elsewhere must stay silent: the final result
+    // will not carry it.
+    const releaseCapture = ctx.executionScope.captureOutput(
+      redirectedOutputStreams(redirections),
+    );
     try {
       const result = await run(prepared);
       return await applyRedirections(
@@ -1081,6 +1126,7 @@ export async function withPreparedRedirections(
         prepared.standardRoutes,
       );
     } finally {
+      releaseCapture();
       if (prepared.stdin !== undefined) {
         ctx.state.groupStdin = savedGroupStdin;
         ctx.state.groupStdinSourceFd = savedGroupStdinSourceFd;

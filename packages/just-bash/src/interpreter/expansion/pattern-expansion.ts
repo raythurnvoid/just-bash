@@ -131,6 +131,11 @@ async function executeCommandSubstitutionFromString(
   const savedSuppressVerbose = ctx.state.suppressVerbose;
   const savedLastBackgroundPid = ctx.state.lastBackgroundPid;
   ctx.state.suppressVerbose = true;
+  // The body's stdout is the substitution value, never live output
+  const releaseCapture = ctx.executionScope.captureOutput({
+    stdout: true,
+    stderr: false,
+  });
 
   try {
     const result = await ctx.executeScript(ast);
@@ -171,6 +176,8 @@ async function executeCommandSubstitutionFromString(
       return error.stdout?.replace(/\n+$/, "") ?? "";
     }
     return "";
+  } finally {
+    releaseCapture();
   }
 }
 

@@ -26,7 +26,7 @@ import {
   isLazyCommand,
 } from "./custom-commands.js";
 import { encodeUtf8ToBytes, latin1FromBytes } from "./encoding.js";
-import { ExecutionScope } from "./execution-scope.js";
+import { ExecutionScope, type LiveOutputHook } from "./execution-scope.js";
 import { InMemoryFs } from "./fs/in-memory-fs/in-memory-fs.js";
 import { initFilesystem } from "./fs/init.js";
 import type { IFileSystem, InitialFiles } from "./fs/interface.js";
@@ -224,6 +224,12 @@ export interface BashOptions {
    */
   trace?: TraceCallback;
   /**
+   * Live output hook. Called with the output of each statement as it
+   * finishes, in every exec of this instance and in the nested execs a
+   * command starts (`bash -c`, `xargs`, `timeout`). See LiveOutputHook.
+   */
+  onOutput?: LiveOutputHook;
+  /**
    * Defense-in-depth configuration.
    *
    * When enabled, monkey-patches dangerous JavaScript globals (Function, eval,
@@ -355,6 +361,7 @@ export class Bash {
   private secureFetch?: SecureFetch;
   private sleepFn?: (ms: number) => Promise<void>;
   private traceFn?: TraceCallback;
+  private onOutputFn?: LiveOutputHook;
   private logger?: BashLogger;
   private defenseInDepthConfig?: DefenseInDepthConfig | boolean;
   private coverageWriter?: FeatureCoverageWriter;
@@ -426,6 +433,8 @@ export class Bash {
 
     // Store trace callback if provided (for performance profiling)
     this.traceFn = options.trace;
+
+    this.onOutputFn = options.onOutput;
 
     // Store logger if provided
     this.logger = options.logger;
@@ -657,7 +666,11 @@ export class Bash {
     commandLine: string,
     options?: ExecOptions,
   ): Promise<BashExecResult> {
-    const executionScope = new ExecutionScope(this.limits, options?.signal);
+    const executionScope = new ExecutionScope(
+      this.limits,
+      options?.signal,
+      this.onOutputFn,
+    );
     let result: BashExecResult;
     try {
       result = await this.execInScope(

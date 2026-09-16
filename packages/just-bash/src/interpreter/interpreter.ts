@@ -523,6 +523,7 @@ export class Interpreter {
       node.sourceText
     ) {
       statementOutput.append("stderr", `${node.sourceText}\n`);
+      this.ctx.executionScope.emitOutput("stderr", `${node.sourceText}\n`);
     }
     let exitCode = 0;
     let lastExecutedIndex = -1;
@@ -540,6 +541,7 @@ export class Interpreter {
           snapshot: snapshotInterpreterState(this.ctx.state),
         });
         statementOutput.append("stderr", launch.stderr);
+        this.ctx.executionScope.emitOutput("stderr", launch.stderr);
         // `!` does not reach the launch status. Real bash reports 0 for
         // `! true &` and for `! false &`, because the status of an async
         // statement is the status of starting it. So a started job is 0 and a
@@ -577,12 +579,25 @@ export class Interpreter {
         if (operator === "&&" && exitCode !== 0) continue;
         if (operator === "||" && exitCode === 0) continue;
 
+        const liveBefore = this.ctx.executionScope.liveOutputUnits;
         const result = await this.executePipeline(pipeline);
         // Decode each pipeline's stdout to text via its explicit `stdoutKind`
         // before concatenating, so a statement that joins text-shaped and
         // byte-shaped pipelines with && / || does not interleave raw byte and
         // Unicode chunks (which would defeat the output-boundary UTF-8 decode).
-        statementOutput.appendResult(result, decodedTextFromResult(result));
+        const stdoutText = decodedTextFromResult(result);
+        statementOutput.appendResult(result, stdoutText);
+        // Hand the pipeline output to the live output hook, one stream at a
+        // time. A stream the statements inside the pipeline already streamed
+        // (a loop body, eval, a function, a nested exec) is skipped: this
+        // result only relays it.
+        const liveAfter = this.ctx.executionScope.liveOutputUnits;
+        if (liveAfter.stdout === liveBefore.stdout) {
+          this.ctx.executionScope.emitOutput("stdout", stdoutText);
+        }
+        if (liveAfter.stderr === liveBefore.stderr) {
+          this.ctx.executionScope.emitOutput("stderr", result.stderr);
+        }
         exitCode = result.exitCode;
         lastExecutedIndex = i;
         lastPipelineNegated = pipeline.negated;

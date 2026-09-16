@@ -101,6 +101,14 @@ export async function executePipeline(
 
     let result: ExecResult;
     const outputCheckpoint = ctx.executionScope.outputBytesUsed;
+    // A non-last stage's stdout is pipe content, and so is its stderr under
+    // `|&`: keep the statements inside the stage from streaming it.
+    const releaseCapture = isLast
+      ? undefined
+      : ctx.executionScope.captureOutput({
+          stdout: true,
+          stderr: node.pipeStderr?.[i] ?? false,
+        });
     try {
       ctx.state.commandCount = ctx.executionScope.chargeCommand();
       result = await executeCommand(command, stdin);
@@ -178,6 +186,7 @@ export async function executePipeline(
         ctx.state.groupStdin = sharedStdin;
         ctx.state.groupStdinSourceFd = sharedStdinSourceFd;
       }
+      releaseCapture?.();
     }
 
     // Restore environment for subshell commands to prevent variable assignment leakage

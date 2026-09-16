@@ -280,6 +280,12 @@ async function runBody(
   ctx.state.bashPid = ctx.state.nextVirtualPid++;
   ctx.state.suppressVerbose = true;
   if (stdin !== undefined) ctx.state.groupStdin = stdin;
+  // The body's stdout is a file for the outer command (`<(...)`) or is
+  // appended to the outer command's own output (`>(...)`), never live output
+  const releaseCapture = ctx.executionScope.captureOutput({
+    stdout: true,
+    stderr: false,
+  });
 
   let result: ExecResult;
   try {
@@ -298,6 +304,7 @@ async function runBody(
     }
     throw error;
   } finally {
+    releaseCapture();
     ctx.substitutionDepth = savedDepth;
     ctx.state.env = savedEnv;
     ctx.state.arrays = savedArrays;
