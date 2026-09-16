@@ -105,6 +105,7 @@ import {
   EXEC_REDIRECTION_POLICY,
   preparedRedirectionError,
   type RedirectionTransaction,
+  redirectedOutputStreams,
   SIMPLE_REDIRECTION_POLICY,
   withPreparedRedirections,
 } from "./redirections.js";
@@ -1149,6 +1150,16 @@ export class Interpreter {
     let cmdResult: ExecResult;
     let controlFlowError: BreakError | ContinueError | null = null;
 
+    // A function body, `eval`, `source` and a nested `bash -c` run statements that stream their
+    // own output. A stream this command's redirections point elsewhere must stay silent, the same
+    // way a redirected compound stays silent: the final result will not carry it. A builtin or an
+    // external command hands its output back as a value, so the capture changes nothing there.
+    const releaseCapture =
+      node.redirections.length > 0
+        ? this.ctx.executionScope.captureOutput(
+            redirectedOutputStreams(node.redirections),
+          )
+        : undefined;
     try {
       cmdResult = await this.runCommand(
         commandName,
@@ -1170,6 +1181,8 @@ export class Interpreter {
         restoreTempBindings();
         throw error;
       }
+    } finally {
+      releaseCapture?.();
     }
 
     // Commands without stdin access leave descriptor input untouched. `read`

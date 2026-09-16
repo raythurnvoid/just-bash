@@ -133,6 +133,23 @@ describe("onOutput", () => {
     expect(chunks).toEqual([{ stream: "stdout", text: "b\n" }]);
   });
 
+  it("keeps a redirected function, eval and nested exec silent", async () => {
+    const { bash, stdout } = createBash();
+    // A builtin hands its output back as a value, so only a body that runs statements of its
+    // own can show whether the command's redirection silenced the live stream.
+    await bash.exec(
+      "f() { echo fn; }\nf > out\neval 'echo ev' > out\nbash -c 'echo nested' > out\ncat out",
+    );
+    expect(stdout()).toEqual(["nested\n"]);
+  });
+
+  it("keeps a redirected function's output on one stream only", async () => {
+    const { bash, stdout, stderr } = createBash();
+    const result = await bash.exec("f() { echo fn >&2; }\nf 2>&1");
+    expect(stdout().join("")).toBe(result.stdout);
+    expect(stderr().join("")).toBe(result.stderr);
+  });
+
   it("streams the launch line of a background statement", async () => {
     const { bash, chunks } = createBash();
     await bash.exec("echo bg &", {

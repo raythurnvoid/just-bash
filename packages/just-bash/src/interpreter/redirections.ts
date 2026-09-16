@@ -1055,7 +1055,7 @@ export async function routeControlFlowError(
  * no-op like `>&1` counts too; that only silences live output the final
  * result still carries.
  */
-function redirectedOutputStreams(redirections: RedirectionNode[]): {
+export function redirectedOutputStreams(redirections: RedirectionNode[]): {
   stdout: boolean;
   stderr: boolean;
 } {
