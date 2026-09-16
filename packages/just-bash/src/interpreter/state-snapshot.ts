@@ -6,8 +6,9 @@
  * options, variable attributes, function definitions and the cd history.
  *
  * Not carried on purpose: the cwd (the host owns it), local scopes (already
- * inside env), the call stack, counters and virtual pids, completion specs
- * and the hash table. Open extra fds are reported but never restored.
+ * inside env), the call stack, counters, completion specs and the hash table.
+ * Open extra fds are reported but never restored. The last background launch
+ * is carried, because `$!` must keep naming the job the script started.
  */
 
 import type { FunctionDefNode } from "../ast/types.js";
@@ -44,6 +45,11 @@ export interface InterpreterStateSnapshot {
   directoryStack: string[];
   lastExitCode: number;
   lastArg: string;
+  /**
+   * What `$!` reads: the last background launch. Optional because an older
+   * snapshot does not have it. Restore then leaves `$!` at 0.
+   */
+  lastBackgroundPid?: number;
   /** Extra fds still open at the end of the exec (`exec 3>out`). Report only. */
   openFileDescriptors: number[];
 }
@@ -100,6 +106,7 @@ export function snapshotInterpreterState(
     directoryStack: [...(state.directoryStack ?? [])],
     lastExitCode: state.lastExitCode,
     lastArg: state.lastArg,
+    lastBackgroundPid: state.lastBackgroundPid,
     openFileDescriptors: [...(state.fileDescriptors?.keys() ?? [])],
   };
 }
@@ -152,6 +159,7 @@ export function restoreInterpreterState(
   state.directoryStack = [...snapshot.directoryStack];
   state.lastExitCode = snapshot.lastExitCode;
   state.lastArg = snapshot.lastArg;
+  state.lastBackgroundPid = snapshot.lastBackgroundPid ?? 0;
 }
 
 function parseFunctionDefText(text: string): FunctionDefNode | null {

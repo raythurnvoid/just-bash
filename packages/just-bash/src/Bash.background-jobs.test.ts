@@ -289,6 +289,24 @@ describe("onExecEnd and restoreState", () => {
     });
     expect(third.stdout).toBe("/archive\n");
   });
+
+  it("keeps $! across a restore, so the next run can still wait for the job", async () => {
+    const { bash, onBackground } = createBash();
+    let snapshot: InterpreterStateSnapshot | undefined;
+    const first = await bash.exec('sleep 1 &\necho "launched $!"', {
+      onBackground,
+      onExecEnd: (s) => {
+        snapshot = s;
+      },
+    });
+    expect(first.stdout).toBe("launched 1\n");
+    expect(snapshot?.lastBackgroundPid).toBe(1);
+
+    const second = await bash.exec('echo "resumed $!"', {
+      restoreState: snapshot,
+    });
+    expect(second.stdout).toBe("resumed 1\n");
+  });
 });
 
 describe("job control builtins", () => {
