@@ -7,6 +7,7 @@ import { parseArithmeticExpression } from "../../parser/arithmetic-parser.js";
 import { Parser } from "../../parser/parser.js";
 import type { ExecResult } from "../../types.js";
 import { evaluateArithmetic } from "../arithmetic.js";
+import { ExecutionAbortedError } from "../errors.js";
 import {
   assertArrayKeysFit,
   clearArray,
@@ -251,7 +252,10 @@ export async function handleLocal(
         const parser = new Parser();
         const arithAst = parseArithmeticExpression(parser, indexExpr);
         index = await evaluateArithmetic(ctx, arithAst.expression);
-      } catch {
+      } catch (error) {
+        if (error instanceof ExecutionAbortedError) {
+          throw error;
+        }
         // If parsing fails, try to parse as simple number
         const num = parseInt(indexExpr, 10);
         index = Number.isNaN(num) ? 0 : num;

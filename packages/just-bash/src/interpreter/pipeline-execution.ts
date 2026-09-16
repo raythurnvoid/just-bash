@@ -13,7 +13,12 @@ import {
 import { relinquishPipelineOutput } from "../execution-scope.js";
 import { _performanceNow } from "../security/trusted-globals.js";
 import type { ExecResult } from "../types.js";
-import { BadSubstitutionError, ErrexitError, ExitError } from "./errors.js";
+import {
+  BadSubstitutionError,
+  ErrexitError,
+  ExecutionAbortedError,
+  ExitError,
+} from "./errors.js";
 import { clearArray, cloneArrays, setArrayElement } from "./helpers/array.js";
 import { OK } from "./helpers/result.js";
 import type { InterpreterContext } from "./types.js";
@@ -89,12 +94,27 @@ export async function executePipeline(
     // This prevents variable assignments (e.g., ${cmd=echo}) from leaking to parent
     const savedEnv = runsInSubshell ? new Map(ctx.state.env) : null;
     const savedArrays = runsInSubshell ? cloneArrays(ctx.state.arrays) : null;
+    const savedCwd = ctx.state.cwd;
+    const savedCwdToken = ctx.state.cwdToken;
+    const savedPreviousDir = ctx.state.previousDir;
+    const savedLastBackgroundPid = ctx.state.lastBackgroundPid;
 
     let result: ExecResult;
     const outputCheckpoint = ctx.executionScope.outputBytesUsed;
     try {
       ctx.state.commandCount = ctx.executionScope.chargeCommand();
       result = await executeCommand(command, stdin);
+      // A stage that ended while the exec was aborted returns a plain result
+      // (`sleep` returns 0). Stop before the next stage runs. A non-last
+      // stage's stdout is pipe content, and so is its stderr under `|&`, so
+      // only the transcript-bound text travels with the error.
+      if (ctx.state.signal?.aborted) {
+        throw new ExecutionAbortedError(
+          isLast ? result.stdout : "",
+          accumulatedStderr +
+            (isLast || !node.pipeStderr?.[i] ? result.stderr : ""),
+        );
+      }
     } catch (error) {
       // BadSubstitutionError should fail the command but not abort the script
       if (error instanceof BadSubstitutionError) {
@@ -126,6 +146,21 @@ export async function executePipeline(
         if (savedEnv) {
           ctx.state.env = savedEnv;
           ctx.state.arrays = savedArrays ?? new Map();
+          ctx.state.cwd = savedCwd;
+          ctx.state.cwdToken = savedCwdToken;
+          ctx.state.previousDir = savedPreviousDir;
+          ctx.state.lastBackgroundPid = savedLastBackgroundPid;
+        }
+        // An abort thrown by a stage carries that stage's output. Keep only
+        // the transcript-bound part, as on the return path above.
+        if (error instanceof ExecutionAbortedError) {
+          if (!isLast) {
+            error.stdout = "";
+            if (node.pipeStderr?.[i]) {
+              error.stderr = "";
+            }
+          }
+          error.prependOutput("", accumulatedStderr);
         }
         throw error;
       }
@@ -149,6 +184,10 @@ export async function executePipeline(
     if (savedEnv) {
       ctx.state.env = savedEnv;
       ctx.state.arrays = savedArrays ?? new Map();
+      ctx.state.cwd = savedCwd;
+      ctx.state.cwdToken = savedCwdToken;
+      ctx.state.previousDir = savedPreviousDir;
+      ctx.state.lastBackgroundPid = savedLastBackgroundPid;
     }
 
     // Charge every stage before it can become a retained pipeline

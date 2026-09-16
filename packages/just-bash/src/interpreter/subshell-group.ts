@@ -18,6 +18,7 @@ import {
   BreakError,
   ContinueError,
   ErrexitError,
+  ExecutionAbortedError,
   ExecutionLimitError,
   ExitError,
   isScopeExitError,
@@ -31,7 +32,7 @@ import {
   getFdEntry,
 } from "./fd-table.js";
 import { getErrorMessage } from "./helpers/errors.js";
-import { failure, result } from "./helpers/result.js";
+import { failure, result, throwIfAborted } from "./helpers/result.js";
 import {
   type PreparedRedirections,
   withPreparedRedirections,
@@ -130,6 +131,11 @@ async function executeSubshellBody(
   } catch (error) {
     // ExecutionLimitError must always propagate - these are safety limits
     if (error instanceof ExecutionLimitError) {
+      output.prependTo(error);
+      throw error;
+    }
+    // An abort ends the subshell and the shell around it.
+    if (error instanceof ExecutionAbortedError) {
       output.prependTo(error);
       throw error;
     }
@@ -300,7 +306,8 @@ async function executeGroupBody(
     if (
       isScopeExitError(error) ||
       error instanceof ErrexitError ||
-      error instanceof ExitError
+      error instanceof ExitError ||
+      error instanceof ExecutionAbortedError
     ) {
       error.prependOutput(output.stdout, output.stderr);
       throw error;
@@ -380,6 +387,9 @@ export async function executeUserScript(
     const ast = parser.parse(content);
     const execResult = await executeScript(ast);
     cleanup();
+    // The script returns a plain result when the exec was aborted. Stop
+    // here before the caller runs anything else.
+    throwIfAborted(ctx, execResult.stdout, execResult.stderr);
     return execResult;
   } catch (error) {
     cleanup();
@@ -390,8 +400,11 @@ export async function executeUserScript(
       return result(error.stdout, error.stderr, error.exitCode);
     }
 
-    // ExecutionLimitError must always propagate
-    if (error instanceof ExecutionLimitError) {
+    // ExecutionLimitError and an abort must always propagate
+    if (
+      error instanceof ExecutionLimitError ||
+      error instanceof ExecutionAbortedError
+    ) {
       throw error;
     }
 

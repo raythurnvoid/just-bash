@@ -27,6 +27,7 @@ import { evaluateArithmetic } from "../arithmetic.js";
 import {
   ArithmeticError,
   BadSubstitutionError,
+  ExecutionAbortedError,
   ExecutionLimitError,
   ExitError,
 } from "../errors.js";
@@ -136,7 +137,10 @@ export async function handleAssignDefault(
           const parser = new Parser();
           const arithAst = parseArithmeticExpression(parser, subscriptExpr);
           index = await evaluateArithmetic(ctx, arithAst.expression);
-        } catch {
+        } catch (error) {
+          if (error instanceof ExecutionAbortedError) {
+            throw error;
+          }
           const varValue = ctx.state.env.get(subscriptExpr);
           index = varValue ? Number.parseInt(varValue, 10) : 0;
         }
@@ -311,7 +315,10 @@ export async function handlePatternReplacement(
       operation.all,
     );
   } catch (e) {
-    if (e instanceof ExecutionLimitError) {
+    if (
+      e instanceof ExecutionLimitError ||
+      e instanceof ExecutionAbortedError
+    ) {
       throw e;
     }
     return value;

@@ -6,7 +6,7 @@
  */
 
 import type { ExecResult } from "../../types.js";
-import { ExecutionLimitError } from "../errors.js";
+import { ExecutionAbortedError, ExecutionLimitError } from "../errors.js";
 import type { InterpreterContext } from "../types.js";
 
 /**
@@ -97,6 +97,25 @@ export function throwExecutionLimit(
   stderr = "",
 ): never {
   throw new ExecutionLimitError(message, limitType, stdout, stderr);
+}
+
+/**
+ * Throw ExecutionAbortedError when the exec signal is already aborted.
+ *
+ * Use it right after a nested run returns (eval, source, `$(...)`, a script
+ * run by execFn). A nested run that ends while the signal is aborted may
+ * have returned a plain result instead of throwing, and the next statement
+ * of the caller would run. The output so far travels with the error so
+ * Bash.exec can still report it.
+ */
+export function throwIfAborted(
+  ctx: InterpreterContext,
+  stdout = "",
+  stderr = "",
+): void {
+  if (ctx.state.signal?.aborted) {
+    throw new ExecutionAbortedError(stdout, stderr);
+  }
 }
 
 /**

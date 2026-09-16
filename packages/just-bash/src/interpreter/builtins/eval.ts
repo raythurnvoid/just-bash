@@ -13,7 +13,7 @@ import {
   ExitError,
   ReturnError,
 } from "../errors.js";
-import { failure, OK } from "../helpers/result.js";
+import { failure, OK, throwIfAborted } from "../helpers/result.js";
 import type { InterpreterContext } from "../types.js";
 
 export async function handleEval(
@@ -71,7 +71,9 @@ export async function handleEval(
   try {
     // Parse and execute in the current environment
     const ast = parse(command);
-    return await ctx.executeScript(ast);
+    const result = await ctx.executeScript(ast);
+    throwIfAborted(ctx, result.stdout, result.stderr);
+    return result;
   } catch (error) {
     // Rethrow control flow errors so they propagate to outer loops/functions
     if (

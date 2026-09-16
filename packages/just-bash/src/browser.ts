@@ -50,6 +50,7 @@ export {
   type MountableFsOptions,
   type MountConfig,
 } from "./fs/mountable-fs/index.js";
+export type { InterpreterStateSnapshot } from "./interpreter/state-snapshot.js";
 export type { NetworkConfig } from "./network/index.js";
 export {
   NetworkAccessDeniedError,

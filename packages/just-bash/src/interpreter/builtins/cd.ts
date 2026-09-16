@@ -116,6 +116,10 @@ export async function handleCd(
 
   ctx.state.previousDir = ctx.state.cwd;
   ctx.state.cwd = newDir;
+  if (ctx.state.cwdToken) {
+    ctx.state.cwdToken = {};
+    await ctx.state.onCwdChange?.(newDir, ctx.state.cwdToken);
+  }
   ctx.state.env.set("PWD", ctx.state.cwd);
   ctx.state.env.set("OLDPWD", ctx.state.previousDir);
 

@@ -20,6 +20,7 @@ import type {
   TraceCallback,
 } from "../types.js";
 import type { ProcessSubstitutionEntry } from "./process-substitution.js";
+import type { BackgroundLaunch, BackgroundResult } from "./state-snapshot.js";
 
 export type InterpreterExecOptions = Omit<CommandExecOptions, "cwd"> & {
   cwd?: string;
@@ -408,6 +409,10 @@ export interface InterpreterState
   arrays?: Map<string, ShellArray>;
   /** Current working directory */
   cwd: string;
+  /** Replaced on successful navigation and restored with subshell state. */
+  cwdToken?: object;
+  /** Host callback for a new directory selection. Enabled with cwdToken. */
+  onCwdChange?: (path: string, token: object) => Promise<void>;
   /** Previous directory (for `cd -`) */
   previousDir: string;
 
@@ -459,6 +464,11 @@ export interface InterpreterState
   signal?: AbortSignal;
   /** Extra arguments injected via exec({ args }), appended to first command's args */
   extraArgs?: string[];
+  /**
+   * Host hook for a `&` statement. Set per exec like `signal`, never on the
+   * Bash instance, so a nested exec (`bash -c 'cmd &'`) runs its `&` inline.
+   */
+  onBackground?: (launch: BackgroundLaunch) => Promise<BackgroundResult>;
 }
 
 export interface ShellArray {

@@ -80,11 +80,36 @@ export class Parser {
     delimiter: string;
     stripTabs: boolean;
     quoted: boolean;
+    seq: number;
   }[] = [];
   private readonly parseBudget: ParseBudget;
   private readonly ownsParseBudget: boolean;
   private _input = "";
   private processLineState: ProcessLineState | undefined;
+  /**
+   * The sequence number the next heredoc gets. It only grows, so a statement
+   * can tell its own heredocs from an earlier statement's even though
+   * processHeredocs empties pendingHeredocs whenever a newline arrives.
+   */
+  private nextHeredocSeq = 0;
+  /**
+   * Where each heredoc body already read sits in the input. The body text of a
+   * statement lands after the line that opened it, so it can sit between the
+   * tokens of a later statement on that same line. Those statements cut these
+   * ranges out of their own source text.
+   */
+  private heredocBodyRanges: { seq: number; start: number; end: number }[] = [];
+  /**
+   * Statements and function definitions whose heredoc bodies are still to
+   * come. processHeredocs completes their sourceText with those bodies.
+   * `own` is the source text without the body ranges of other statements.
+   */
+  private heredocSourceTargets: {
+    node: StatementNode | FunctionDefNode;
+    own: string;
+    hStart: number;
+    hEnd: number;
+  }[] = [];
 
   constructor(parseBudget?: ParseBudget) {
     this.parseBudget = parseBudget ?? new ParseBudget();
@@ -157,6 +182,9 @@ export class Parser {
 
       this.pos = 0;
       this.pendingHeredocs = [];
+      this.nextHeredocSeq = 0;
+      this.heredocBodyRanges = [];
+      this.heredocSourceTargets = [];
       this.parseBudget.chargeTokens(this.tokens.length);
       return this.parseScript();
     } finally {
@@ -174,6 +202,9 @@ export class Parser {
       this.tokens = tokens;
       this.pos = 0;
       this.pendingHeredocs = [];
+      this.nextHeredocSeq = 0;
+      this.heredocBodyRanges = [];
+      this.heredocSourceTargets = [];
       this.processLineState = undefined;
       this.parseBudget.chargeTokens(tokens.length);
       return this.parseScript();
@@ -301,14 +332,30 @@ export class Parser {
     stripTabs: boolean,
     quoted: boolean,
   ): void {
-    this.pendingHeredocs.push({ redirect, delimiter, stripTabs, quoted });
+    this.pendingHeredocs.push({
+      redirect,
+      delimiter,
+      stripTabs,
+      quoted,
+      seq: this.nextHeredocSeq++,
+    });
   }
 
   private processHeredocs(): void {
+    // The raw body text of every heredoc read here, by sequence number. A
+    // heredoc with no HEREDOC_CONTENT token in the input gets no entry.
+    const bodies = new Map<number, string>();
+
     // Process pending here-documents
     for (const heredoc of this.pendingHeredocs) {
       if (this.check(TokenType.HEREDOC_CONTENT)) {
         const content = this.advance();
+        bodies.set(heredoc.seq, this._input.slice(content.start, content.end));
+        this.heredocBodyRanges.push({
+          seq: heredoc.seq,
+          start: content.start,
+          end: content.end,
+        });
         let contentWord: WordNode;
 
         if (heredoc.quoted) {
@@ -336,6 +383,53 @@ export class Parser {
       }
     }
     this.pendingHeredocs = [];
+
+    // Complete the source text of every statement and function whose heredoc
+    // bodies came in with this newline. The bodies of all statements on one
+    // line arrive in a row after that line, so a plain slice from one
+    // statement's start to the last body's end would also contain its
+    // neighbours. Compose instead: the target's own text, a newline, then only
+    // the bodies of its own heredocs.
+    for (const target of this.heredocSourceTargets) {
+      let text = "";
+      for (let seq = target.hStart; seq < target.hEnd; seq++) {
+        // A heredoc of this statement that an earlier newline already read has
+        // no entry here. Its body already sits inside the own text.
+        text += bodies.get(seq) ?? "";
+      }
+      target.node.sourceText = `${target.own}\n${text}`;
+    }
+    this.heredocSourceTargets = [];
+  }
+
+  /**
+   * The source text a statement or function owns, from its first token to its
+   * last one. The heredoc bodies of earlier statements on the same line sit
+   * inside that input range, so cut them out. Report the cut byte count too, so
+   * the caller can move down an offset it recorded into the range.
+   *
+   * A heredoc this statement opened itself keeps its body. When a newline inside
+   * the statement already read that body, the body belongs to this text.
+   */
+  private ownSourceText(
+    startOffset: number,
+    endOffset: number,
+    hStart: number,
+  ): { text: string; cut: number } {
+    let text = "";
+    let cursor = startOffset;
+    let cut = 0;
+
+    for (const body of this.heredocBodyRanges) {
+      if (body.seq >= hStart) continue;
+      if (body.start < startOffset || body.end > endOffset) continue;
+
+      text += this._input.slice(cursor, body.start);
+      cursor = body.end;
+      cut += body.end - body.start;
+    }
+
+    return { text: text + this._input.slice(cursor, endOffset), cut };
   }
 
   isStatementEnd(): boolean {
@@ -510,10 +604,13 @@ export class Parser {
 
     // Record the start position for verbose mode source text
     const startOffset = this.current().start;
+    // Heredocs numbered below this belong to earlier statements on this line
+    const hStart = this.nextHeredocSeq;
 
     const pipelines: PipelineNode[] = [];
     const operators: ("&&" | "||" | ";")[] = [];
     let background = false;
+    let backgroundTokenOffset: number | undefined;
 
     // Parse first pipeline
     const firstPipeline = this.parsePipeline();
@@ -530,23 +627,40 @@ export class Parser {
 
     // Check for background execution
     if (this.check(TokenType.AMP)) {
-      this.advance();
+      const amp = this.advance();
       background = true;
+      backgroundTokenOffset = amp.start - startOffset;
     }
 
     // Extract source text for verbose mode (set -v)
     // Get the end position from the last consumed token
     const endOffset =
       this.pos > 0 ? this.tokens[this.pos - 1].end : startOffset;
-    const sourceText = this._input.slice(startOffset, endOffset);
+    const own = this.ownSourceText(startOffset, endOffset, hStart);
 
-    return AST.statement(
+    const node = AST.statement(
       pipelines,
       operators,
       background,
       undefined,
-      sourceText,
+      own.text,
     );
+    if (backgroundTokenOffset !== undefined) {
+      // Every cut range sits before the `&`, because the `&` is the last token
+      // of the statement. So the offset moves down by the whole cut.
+      node.backgroundTokenOffset = backgroundTokenOffset - own.cut;
+    }
+    // A heredoc of this statement that is still pending has its body after the
+    // next newline; processHeredocs appends it to sourceText then.
+    if (this.pendingHeredocs.some((heredoc) => heredoc.seq >= hStart)) {
+      this.heredocSourceTargets.push({
+        node,
+        own: own.text,
+        hStart,
+        hEnd: this.nextHeredocSeq,
+      });
+    }
+    return node;
   }
 
   // ===========================================================================
@@ -1216,6 +1330,9 @@ export class Parser {
 
   private parseFunctionDef(): FunctionDefNode {
     let name: string;
+    // Source text bounds, kept so a function can be stored and defined again later
+    const startOffset = this.current().start;
+    const hStart = this.nextHeredocSeq;
 
     // function name { ... } or function name () { ... }
     if (this.check(TokenType.FUNCTION)) {
@@ -1259,7 +1376,21 @@ export class Parser {
 
     const redirections = this.parseOptionalRedirections();
 
-    return AST.functionDef(name, body, redirections);
+    const node = AST.functionDef(name, body, redirections);
+    const endOffset = this.tokens[this.pos - 1].end;
+    const own = this.ownSourceText(startOffset, endOffset, hStart);
+    node.sourceText = own.text;
+    // A one-line body with a heredoc gets its body text from processHeredocs,
+    // the same way the statement around it does.
+    if (this.pendingHeredocs.some((heredoc) => heredoc.seq >= hStart)) {
+      this.heredocSourceTargets.push({
+        node,
+        own: own.text,
+        hStart,
+        hEnd: this.nextHeredocSeq,
+      });
+    }
+    return node;
   }
 
   private parseCompoundCommandBody(options?: {

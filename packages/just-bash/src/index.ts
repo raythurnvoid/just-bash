@@ -79,6 +79,7 @@ export {
   ReadWriteFs,
   type ReadWriteFsOptions,
 } from "./fs/read-write-fs/index.js";
+export type { InterpreterStateSnapshot } from "./interpreter/state-snapshot.js";
 export type {
   AllowedUrl,
   AllowedUrlEntry,

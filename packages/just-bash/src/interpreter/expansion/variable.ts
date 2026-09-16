@@ -13,7 +13,11 @@ import { parseArithmeticExpression } from "../../parser/arithmetic-parser.js";
 import { Parser } from "../../parser/parser.js";
 import { BASH_VERSION } from "../../shell-metadata.js";
 import { evaluateArithmetic } from "../arithmetic.js";
-import { BadSubstitutionError, NounsetError } from "../errors.js";
+import {
+  BadSubstitutionError,
+  ExecutionAbortedError,
+  NounsetError,
+} from "../errors.js";
 import {
   getArrayElement,
   getArrayIndices,
@@ -334,7 +338,10 @@ export async function getVariable(
         const parser = new Parser();
         const arithAst = parseArithmeticExpression(parser, subscript);
         index = await evaluateArithmetic(ctx, arithAst.expression);
-      } catch {
+      } catch (error) {
+        if (error instanceof ExecutionAbortedError) {
+          throw error;
+        }
         // Fall back to simple variable lookup for backwards compatibility
         const evalValue = ctx.state.env.get(subscript);
         index = evalValue ? Number.parseInt(evalValue, 10) : 0;
@@ -557,7 +564,10 @@ export async function isVariableSet(
         const parser = new Parser();
         const arithAst = parseArithmeticExpression(parser, subscript);
         index = await evaluateArithmetic(ctx, arithAst.expression);
-      } catch {
+      } catch (error) {
+        if (error instanceof ExecutionAbortedError) {
+          throw error;
+        }
         const evalValue = ctx.state.env.get(subscript);
         index = evalValue ? Number.parseInt(evalValue, 10) : 0;
         if (Number.isNaN(index)) index = 0;

@@ -21,6 +21,7 @@ import { GlobExpander } from "../shell/glob.js";
 import { evaluateArithmetic } from "./arithmetic.js";
 import {
   BadSubstitutionError,
+  ExecutionAbortedError,
   ExecutionLimitError,
   ExitError,
 } from "./errors.js";
@@ -91,6 +92,7 @@ import {
   splitByIfsForExpansion,
 } from "./helpers/ifs.js";
 import { isNameref, resolveNameref } from "./helpers/nameref.js";
+import { throwIfAborted } from "./helpers/result.js";
 import { recordSubstitutionExit } from "./helpers/substitution-status.js";
 import { getLiteralValue, isQuotedPart } from "./helpers/word-parts.js";
 import { openProcessSubstitution } from "./process-substitution.js";
@@ -778,7 +780,10 @@ async function expandPart(
           return result;
         } catch (error) {
           // ExecutionLimitError must propagate
-          if (error instanceof ExecutionLimitError) {
+          if (
+            error instanceof ExecutionLimitError ||
+            error instanceof ExecutionAbortedError
+          ) {
             throw error;
           }
           // File not found or read error - return empty string, set exit code
@@ -811,10 +816,13 @@ async function expandPart(
       const savedEnv = new Map(ctx.state.env);
       const savedArrays = cloneArrays(ctx.state.arrays);
       const savedCwd = ctx.state.cwd;
+      const savedCwdToken = ctx.state.cwdToken;
       // Suppress verbose mode (set -v) inside command substitutions
       // bash only prints verbose output for the main script
       const savedSuppressVerbose = ctx.state.suppressVerbose;
       ctx.state.suppressVerbose = true;
+      // `$(cmd &)` launches inside the substitution; its `$!` stays there
+      const savedLastBackgroundPid = ctx.state.lastBackgroundPid;
       try {
         const result = await ctx.executeScript(part.body);
         // Restore environment but preserve exit code
@@ -822,17 +830,22 @@ async function expandPart(
         ctx.state.env = savedEnv;
         ctx.state.arrays = savedArrays;
         ctx.state.cwd = savedCwd;
+        ctx.state.cwdToken = savedCwdToken;
         ctx.state.suppressVerbose = savedSuppressVerbose;
+        ctx.state.lastBackgroundPid = savedLastBackgroundPid;
         // Store the exit code for $?
         recordSubstitutionExit(ctx.state, exitCode);
+        ctx.state.bashPid = savedBashPid;
+        ctx.substitutionDepth = savedDepth;
+        // The nested script may have returned normally while the exec was
+        // aborted. Stop here before the outer command uses the output.
+        throwIfAborted(ctx, "", result.stderr);
         // Command substitution stderr should go to the shell's stderr at expansion time,
         // NOT be affected by later redirections on the outer command
         if (result.stderr) {
           ctx.state.expansionStderr =
             (ctx.state.expansionStderr || "") + result.stderr;
         }
-        ctx.state.bashPid = savedBashPid;
-        ctx.substitutionDepth = savedDepth;
         const output = result.stdout.replace(/\n+$/, "");
         // Check string length limit for command substitution output
         checkStringLength(
@@ -846,11 +859,16 @@ async function expandPart(
         ctx.state.env = savedEnv;
         ctx.state.arrays = savedArrays;
         ctx.state.cwd = savedCwd;
+        ctx.state.cwdToken = savedCwdToken;
         ctx.state.bashPid = savedBashPid;
         ctx.substitutionDepth = savedDepth;
         ctx.state.suppressVerbose = savedSuppressVerbose;
+        ctx.state.lastBackgroundPid = savedLastBackgroundPid;
         // ExecutionLimitError must always propagate - these are safety limits
-        if (error instanceof ExecutionLimitError) {
+        if (
+          error instanceof ExecutionLimitError ||
+          error instanceof ExecutionAbortedError
+        ) {
           throw error;
         }
         if (error instanceof ExitError) {

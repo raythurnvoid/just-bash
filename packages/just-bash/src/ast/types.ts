@@ -68,6 +68,11 @@ export interface StatementNode extends ASTNode {
    * When verbose mode is enabled, this text is printed to stderr before execution.
    */
   sourceText?: string;
+  /**
+   * Offset of the trailing `&` inside sourceText, when background is true.
+   * The background hook receives sourceText cut at this offset.
+   */
+  backgroundTokenOffset?: number;
 }
 
 // =============================================================================
@@ -234,6 +239,11 @@ export interface FunctionDefNode extends ASTNode {
   redirections: RedirectionNode[];
   /** Source file where the function was defined (for BASH_SOURCE tracking) */
   sourceFile?: string;
+  /**
+   * Original source text of the definition, heredoc bodies included.
+   * A state snapshot stores it so the function can be defined again later.
+   */
+  sourceText?: string;
 }
 
 // =============================================================================

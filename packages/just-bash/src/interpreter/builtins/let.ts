@@ -18,6 +18,7 @@ import type { ArithmeticCommandNode } from "../../ast/types.js";
 import { parse } from "../../parser/parser.js";
 import type { ExecResult } from "../../types.js";
 import { evaluateArithmetic } from "../arithmetic.js";
+import { ExecutionAbortedError } from "../errors.js";
 import { failure, result } from "../helpers/result.js";
 import type { InterpreterContext } from "../types.js";
 
@@ -93,6 +94,9 @@ export async function handleLet(
         }
       }
     } catch (error) {
+      if (error instanceof ExecutionAbortedError) {
+        throw error;
+      }
       return failure(`bash: let: ${expr}: ${(error as Error).message}\n`);
     }
   }

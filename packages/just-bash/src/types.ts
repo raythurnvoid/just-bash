@@ -64,6 +64,8 @@ export interface ExecResult {
 /** Result from BashEnv.exec() - always includes env */
 export interface BashExecResult extends ExecResult {
   env: Record<string, string>;
+  /** Final shell directory when exec was given a cwdToken. Independent of $PWD. */
+  cwd?: { path: string; token: object };
   metadata?: Record<string, unknown>;
 }
 

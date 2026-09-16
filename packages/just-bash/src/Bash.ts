@@ -54,6 +54,13 @@ import {
   type InterpreterState,
 } from "./interpreter/index.js";
 import {
+  type BackgroundLaunch,
+  type BackgroundResult,
+  type InterpreterStateSnapshot,
+  restoreInterpreterState,
+  snapshotInterpreterState,
+} from "./interpreter/state-snapshot.js";
+import {
   type ExecutionLimitProfile,
   type ExecutionLimits,
   resolveLimits,
@@ -281,6 +288,14 @@ export interface ExecOptions {
    */
   cwd?: string;
   /**
+   * Opt in to tracking directory selections. A successful cd, pushd, or popd
+   * replaces this token. Subshells restore the parent token.
+   * The final directory and token are returned in result.cwd.
+   */
+  cwdToken?: object;
+  /** Called after each successful navigation when cwdToken is set. Awaited before the next command. */
+  onCwdChange?: (path: string, token: object) => Promise<void>;
+  /**
    * If true, skip normalizing the script (trimming leading whitespace from lines).
    * Useful when running scripts where leading whitespace is significant (e.g., here-docs).
    * Default: false
@@ -311,6 +326,25 @@ export interface ExecOptions {
    * positional parameters ($1, $2, "$@", etc.).
    */
   args?: string[];
+  /**
+   * Host hook for a `&` statement. When set, the interpreter hands the
+   * statement text, the live cwd and a state snapshot to the host instead
+   * of running it inline. The host answers with a job number (sets `$!`,
+   * exit 0) or null (exit 1). Per exec only: a nested exec has no hook.
+   */
+  onBackground?: (launch: BackgroundLaunch) => Promise<BackgroundResult>;
+  /**
+   * Seed this exec's state from a snapshot taken by an earlier exec
+   * (variables, options, attributes, functions, cd history). PWD is set to
+   * the exec cwd afterwards.
+   */
+  restoreState?: InterpreterStateSnapshot;
+  /**
+   * Receives the snapshot of the exec state when the exec ends, on the
+   * normal path and on every error path that produces a result. Not called
+   * for an empty command line or when the exec is refused before it starts.
+   */
+  onExecEnd?: (snapshot: InterpreterStateSnapshot) => void;
 }
 
 export class Bash {
@@ -614,6 +648,11 @@ export class Bash {
     return result;
   }
 
+  exec(
+    commandLine: string,
+    options: ExecOptions & { cwdToken: object },
+  ): Promise<BashExecResult & { cwd: { path: string; token: object } }>;
+  exec(commandLine: string, options?: ExecOptions): Promise<BashExecResult>;
   async exec(
     commandLine: string,
     options?: ExecOptions,
@@ -685,6 +724,12 @@ export class Bash {
           stderr: "",
           exitCode: 0,
           env: mapToRecordWithExtras(this.state.env, effectiveOptions.env),
+          ...(effectiveOptions.cwdToken && {
+            cwd: {
+              path: effectiveOptions.cwd ?? this.state.cwd,
+              token: effectiveOptions.cwdToken,
+            },
+          }),
         };
       }
 
@@ -744,6 +789,8 @@ export class Bash {
           ? new Map()
           : cloneArrays(this.state.arrays),
         cwd: newCwd,
+        cwdToken: effectiveOptions.cwdToken,
+        onCwdChange: effectiveOptions.onCwdChange,
         previousDir: effectiveOptions.env?.OLDPWD ?? this.state.previousDir,
         // Deep copy mutable objects to prevent interference
         functions: new Map(this.state.functions),
@@ -770,6 +817,32 @@ export class Bash {
         signal: effectiveOptions.signal,
         // Extra arguments injected directly into first command's arg list
         extraArgs: effectiveOptions.args,
+        // Per-exec background hook, never inherited by a nested exec
+        onBackground: effectiveOptions.onBackground,
+      };
+
+      // Seed the exec state from an earlier snapshot. The snapshot env
+      // replaces the instance env, so apply this exec's own env and PWD again
+      // on top of it.
+      if (effectiveOptions.restoreState) {
+        restoreInterpreterState(execState, effectiveOptions.restoreState);
+        if (effectiveOptions.env) {
+          for (const [key, value] of Object.entries(effectiveOptions.env)) {
+            execState.env.set(key, value);
+          }
+        }
+        execState.env.set("PWD", newPwd ?? newCwd);
+      }
+
+      // Hand the selected directory and the end state to the host, then log.
+      // Used on the normal path and in every catch arm below that produces a
+      // result.
+      const finish = (execResult: BashExecResult): BashExecResult => {
+        if (execState.cwdToken) {
+          execResult.cwd = { path: execState.cwd, token: execState.cwdToken };
+        }
+        effectiveOptions.onExecEnd?.(snapshotInterpreterState(execState));
+        return finishResult(execResult);
       };
 
       // Normalize indented multi-line scripts (unless rawScript is true)
@@ -840,7 +913,7 @@ export class Bash {
           if (metadata) {
             execResult.metadata = metadata;
           }
-          return finishResult(execResult);
+          return finish(execResult);
         };
 
         // If defense-in-depth is enabled, run within the protected context
@@ -851,7 +924,7 @@ export class Bash {
       } catch (error) {
         // ExitError propagates from 'exit' builtin (including via eval/source)
         if (error instanceof ExitError) {
-          return finishResult({
+          return finish({
             stdout: error.stdout,
             stderr: error.stderr,
             exitCode: error.exitCode,
@@ -861,7 +934,7 @@ export class Bash {
         }
         // PosixFatalError propagates from special builtins in POSIX mode
         if (error instanceof PosixFatalError) {
-          return finishResult({
+          return finish({
             stdout: error.stdout,
             stderr: error.stderr,
             exitCode: error.exitCode,
@@ -869,7 +942,7 @@ export class Bash {
           });
         }
         if (error instanceof ArithmeticError) {
-          return finishResult({
+          return finish({
             stdout: error.stdout,
             stderr: error.stderr,
             exitCode: 1,
@@ -878,7 +951,7 @@ export class Bash {
         }
         // ExecutionAbortedError is thrown when an AbortSignal fires (timeout cancellation)
         if (error instanceof ExecutionAbortedError) {
-          return finishResult({
+          return finish({
             stdout: error.stdout,
             stderr: error.stderr,
             exitCode: 124, // Same as timeout exit code
@@ -888,7 +961,7 @@ export class Bash {
         // ExecutionLimitError is thrown when our conservative limits are exceeded
         // (command count, recursion depth, loop iterations)
         if (error instanceof ExecutionLimitError) {
-          return finishResult({
+          return finish({
             stdout: error.stdout,
             stderr: sanitizeErrorMessage(error.stderr),
             exitCode: ExecutionLimitError.EXIT_CODE,
@@ -898,7 +971,7 @@ export class Bash {
         }
         // SecurityViolationError is thrown when defense-in-depth detects a blocked operation
         if (error instanceof SecurityViolationError) {
-          return finishResult({
+          return finish({
             stdout: "",
             stderr: `bash: security violation: ${sanitizeErrorMessage(error.message)}\n`,
             exitCode: 1,
@@ -906,7 +979,7 @@ export class Bash {
           });
         }
         if ((error as ParseException).name === "ParseException") {
-          return finishResult({
+          return finish({
             stdout: "",
             stderr: `bash: syntax error: ${sanitizeErrorMessage((error as Error).message)}\n`,
             exitCode: 2,
@@ -915,7 +988,7 @@ export class Bash {
         }
         // LexerError is thrown for lexer-level issues like unterminated quotes
         if (error instanceof LexerError) {
-          return finishResult({
+          return finish({
             stdout: "",
             stderr: `bash: ${sanitizeErrorMessage(error.message)}\n`,
             exitCode: 2,
@@ -924,7 +997,7 @@ export class Bash {
         }
         // RangeError occurs when JavaScript call stack is exceeded (deep recursion)
         if (error instanceof RangeError) {
-          return finishResult({
+          return finish({
             stdout: "",
             stderr: `bash: ${sanitizeErrorMessage(error.message)}\n`,
             exitCode: 1,
@@ -943,6 +1016,12 @@ export class Bash {
           stderr: error.stderr,
           exitCode: 124,
           env: mapToRecordWithExtras(this.state.env, effectiveOptions.env),
+          ...(effectiveOptions.cwdToken && {
+            cwd: {
+              path: effectiveOptions.cwd ?? this.state.cwd,
+              token: effectiveOptions.cwdToken,
+            },
+          }),
         });
       }
       if (error instanceof ExecutionLimitError) {
@@ -952,6 +1031,12 @@ export class Bash {
           exitCode: ExecutionLimitError.EXIT_CODE,
           internalOutputAccounting: error.internalOutputAccounting,
           env: mapToRecordWithExtras(this.state.env, effectiveOptions.env),
+          ...(effectiveOptions.cwdToken && {
+            cwd: {
+              path: effectiveOptions.cwd ?? this.state.cwd,
+              token: effectiveOptions.cwdToken,
+            },
+          }),
         });
       }
       throw error;

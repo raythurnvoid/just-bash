@@ -330,6 +330,8 @@ export const xargsCommand: RuntimeCommand = {
       if (maxProcs !== null && maxProcs > 1) {
         // Run in parallel batches
         for (let i = 0; i < cmdArgsList.length; i += maxProcs) {
+          // An aborted inner exec returns a plain result, so check between batches
+          if (ctx.signal?.aborted) break;
           const batch = cmdArgsList.slice(i, i + maxProcs);
           const results = await Promise.all(batch.map(executeCommand));
           for (const result of results) {
@@ -342,6 +344,7 @@ export const xargsCommand: RuntimeCommand = {
       } else {
         // Sequential execution
         for (const cmdArgs of cmdArgsList) {
+          if (ctx.signal?.aborted) break;
           const result = await executeCommand(cmdArgs);
           appendOutput(result);
           if (result.exitCode !== 0) {

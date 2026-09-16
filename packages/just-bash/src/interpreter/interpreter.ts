@@ -82,7 +82,13 @@ import {
 import { expandWord, expandWordWithGlob } from "./expansion.js";
 import { advanceFd } from "./fd-table.js";
 import { executeFunctionDef } from "./functions.js";
-import { failure, OK, result, testResult } from "./helpers/result.js";
+import {
+  failure,
+  OK,
+  result,
+  testResult,
+  throwIfAborted,
+} from "./helpers/result.js";
 import { isPosixSpecialBuiltin } from "./helpers/shell-constants.js";
 import { nullCommandExitStatus } from "./helpers/substitution-status.js";
 import { isWordLiteralMatch } from "./helpers/word-matching.js";
@@ -103,6 +109,7 @@ import {
   withPreparedRedirections,
 } from "./redirections.js";
 import { processAssignments } from "./simple-command-assignments.js";
+import { snapshotInterpreterState } from "./state-snapshot.js";
 import {
   executeGroup as executeGroupHelper,
   executeSubshell as executeSubshellHelper,
@@ -119,6 +126,28 @@ function unsupportedCommandNode(node: never): never {
 }
 
 export type { InterpreterContext, InterpreterState } from "./types.js";
+
+/**
+ * The text a `&` statement hands to the background hook: sourceText with
+ * the `&` token cut out. Null when there is nothing to launch.
+ *
+ * A leading `!` stays in the text, so the job's own status is inverted while
+ * real bash leaves it alone. Cutting it needs the `!` token offset, which the
+ * parser does not record. This only shows up through `wait` on a job launched
+ * as `! cmd &`, which is a no-op in bash and nothing writes on purpose.
+ */
+function backgroundScript(node: StatementNode): string | null {
+  if (
+    node.sourceText === undefined ||
+    node.backgroundTokenOffset === undefined
+  ) {
+    return null;
+  }
+  const offset = node.backgroundTokenOffset;
+  const script =
+    node.sourceText.slice(0, offset) + node.sourceText.slice(offset + 1);
+  return script.trim() === "" ? null : script;
+}
 
 export interface InterpreterOptions {
   fs: IFileSystem;
@@ -289,6 +318,34 @@ export class Interpreter {
         if (error instanceof ExecutionLimitError) {
           output.prependTo(error);
           throw error;
+        }
+        // An aborted frame keeps the output it already produced. A nested
+        // frame (`$(...)`, eval, source, a PATH script) returns it as a plain
+        // result, so every such caller re-checks the signal with
+        // throwIfAborted before it runs anything else.
+        if (error instanceof ExecutionAbortedError) {
+          exitCode = 124;
+          this.ctx.state.lastExitCode = exitCode;
+          this.ctx.state.env.set("?", String(exitCode));
+          // The execution scope refuses every append once the signal fired. So
+          // join the text the earlier statements produced with the text the
+          // abort carries instead of appending it. Both halves were charged
+          // when they were produced.
+          const collected = output.build(exitCode);
+          return {
+            stdout: collected.stdout + error.stdout,
+            stderr: collected.stderr + error.stderr,
+            exitCode,
+            internalOutputAccounting: {
+              stdout:
+                (collected.internalOutputAccounting?.stdout ?? 0) +
+                error.internalOutputAccounting.stdout,
+              stderr:
+                (collected.internalOutputAccounting?.stderr ?? 0) +
+                error.internalOutputAccounting.stderr,
+            },
+            env: mapToRecord(this.ctx.state.env),
+          };
         }
         if (error instanceof ErrexitError) {
           output.append(
@@ -471,6 +528,47 @@ export class Interpreter {
     let lastExecutedIndex = -1;
     let lastPipelineNegated = false;
 
+    // A `&` statement goes to the host when this exec set the onBackground
+    // hook. The host runs the statement text as its own job, so nothing of
+    // it runs inline here. Without the hook the statement runs inline below.
+    if (node.background && this.ctx.state.onBackground) {
+      const script = backgroundScript(node);
+      if (script !== null) {
+        const launch = await this.ctx.state.onBackground({
+          script,
+          cwd: this.ctx.state.cwd,
+          snapshot: snapshotInterpreterState(this.ctx.state),
+        });
+        statementOutput.append("stderr", launch.stderr);
+        // `!` does not reach the launch status. Real bash reports 0 for
+        // `! true &` and for `! false &`, because the status of an async
+        // statement is the status of starting it. So a started job is 0 and a
+        // refused one is 1, negated or not.
+        const negated = node.pipelines[node.pipelines.length - 1].negated;
+        const launched = launch.jobNumber !== null;
+        if (launch.jobNumber !== null) {
+          this.ctx.state.lastBackgroundPid = launch.jobNumber;
+        }
+        exitCode = launched ? 0 : 1;
+        this.ctx.state.lastExitCode = exitCode;
+        this.ctx.state.env.set("?", String(exitCode));
+        this.ctx.state.errexitSafe = negated;
+        // A refused launch fails the statement under set -e like a plain
+        // failing command would.
+        if (
+          exitCode !== 0 &&
+          this.ctx.state.options.errexit &&
+          !negated &&
+          !this.ctx.state.inCondition
+        ) {
+          const error = new ErrexitError(exitCode);
+          statementOutput.prependTo(error);
+          throw error;
+        }
+        return statementOutput.build(exitCode);
+      }
+    }
+
     try {
       for (let i = 0; i < node.pipelines.length; i++) {
         const pipeline = node.pipelines[i];
@@ -488,6 +586,10 @@ export class Interpreter {
         exitCode = result.exitCode;
         lastExecutedIndex = i;
         lastPipelineNegated = pipeline.negated;
+        // A pipeline that ended while the exec was aborted returns a plain
+        // result (`sleep` returns 0). Stop before `&&` or `||` runs the next
+        // one. The catch below attaches the statement output to the error.
+        throwIfAborted(this.ctx);
 
         // Update $? after each pipeline so it's available for subsequent commands
         this.ctx.state.lastExitCode = exitCode;
@@ -946,6 +1048,48 @@ export class Interpreter {
       this.ctx.state.tempEnvBindings.push(new Map(tempAssignments));
     }
 
+    // In POSIX mode, prefix assignments persist after special builtins
+    // e.g., `foo=bar :` leaves foo=bar in the environment
+    // Exception: `unset` and `eval` - bash doesn't apply POSIX temp binding persistence
+    // for these builtins when they modify the same variable as the temp binding
+    // In non-POSIX mode (bash default), temp assignments are always restored
+    const isPosixSpecialWithPersistence =
+      isPosixSpecialBuiltin(commandName) &&
+      commandName !== "unset" &&
+      commandName !== "eval";
+    const shouldRestoreTempAssignments =
+      !this.ctx.state.options.posix || !isPosixSpecialWithPersistence;
+
+    // Undo the `V=x cmd` prefix bindings. This runs on the normal path and
+    // before every rethrow: an abort inside `V=x eval '...'` must not leave
+    // `V` in the env that onExecEnd snapshots.
+    const restoreTempBindings = (): void => {
+      if (shouldRestoreTempAssignments) {
+        for (const [name, value] of tempAssignments) {
+          // Skip restoration if this variable was a local that was fully unset
+          // This implements bash's behavior where unsetting all local cells
+          // prevents the tempenv from being restored
+          if (this.ctx.state.fullyUnsetLocals?.has(name)) {
+            continue;
+          }
+          if (value === undefined) this.ctx.state.env.delete(name);
+          else this.ctx.state.env.set(name, value);
+        }
+      }
+
+      // Clear temp exported vars after command execution
+      if (this.ctx.state.tempExportedVars) {
+        for (const name of tempAssignments.keys()) {
+          this.ctx.state.tempExportedVars.delete(name);
+        }
+      }
+
+      // Pop tempEnvBindings from the stack
+      if (tempAssignments.size > 0 && this.ctx.state.tempEnvBindings) {
+        this.ctx.state.tempEnvBindings.pop();
+      }
+    };
+
     let cmdResult: ExecResult;
     let controlFlowError: BreakError | ContinueError | null = null;
 
@@ -967,6 +1111,7 @@ export class Interpreter {
         controlFlowError = error;
         cmdResult = OK; // break/continue have exit status 0
       } else {
+        restoreTempBindings();
         throw error;
       }
     }
@@ -1002,6 +1147,7 @@ export class Interpreter {
 
     // If we caught a break/continue error, re-throw it after applying redirections
     if (controlFlowError) {
+      restoreTempBindings();
       throw controlFlowError;
     }
 
@@ -1028,42 +1174,7 @@ export class Interpreter {
       this.ctx.state.lastArg = commandName;
     }
 
-    // In POSIX mode, prefix assignments persist after special builtins
-    // e.g., `foo=bar :` leaves foo=bar in the environment
-    // Exception: `unset` and `eval` - bash doesn't apply POSIX temp binding persistence
-    // for these builtins when they modify the same variable as the temp binding
-    // In non-POSIX mode (bash default), temp assignments are always restored
-    const isPosixSpecialWithPersistence =
-      isPosixSpecialBuiltin(commandName) &&
-      commandName !== "unset" &&
-      commandName !== "eval";
-    const shouldRestoreTempAssignments =
-      !this.ctx.state.options.posix || !isPosixSpecialWithPersistence;
-
-    if (shouldRestoreTempAssignments) {
-      for (const [name, value] of tempAssignments) {
-        // Skip restoration if this variable was a local that was fully unset
-        // This implements bash's behavior where unsetting all local cells
-        // prevents the tempenv from being restored
-        if (this.ctx.state.fullyUnsetLocals?.has(name)) {
-          continue;
-        }
-        if (value === undefined) this.ctx.state.env.delete(name);
-        else this.ctx.state.env.set(name, value);
-      }
-    }
-
-    // Clear temp exported vars after command execution
-    if (this.ctx.state.tempExportedVars) {
-      for (const name of tempAssignments.keys()) {
-        this.ctx.state.tempExportedVars.delete(name);
-      }
-    }
-
-    // Pop tempEnvBindings from the stack
-    if (tempAssignments.size > 0 && this.ctx.state.tempEnvBindings) {
-      this.ctx.state.tempEnvBindings.pop();
-    }
+    restoreTempBindings();
 
     // Include any stderr from expansion errors
     if (this.ctx.state.expansionStderr) {
@@ -1195,6 +1306,9 @@ export class Interpreter {
           }
           return bodyResult;
         } catch (error) {
+          if (error instanceof ExecutionAbortedError) {
+            throw error;
+          }
           return failure(
             `bash: arithmetic expression: ${(error as Error).message}\n`,
           );
@@ -1231,6 +1345,9 @@ export class Interpreter {
           }
           return bodyResult;
         } catch (error) {
+          if (error instanceof ExecutionAbortedError) {
+            throw error;
+          }
           const exitCode = error instanceof ArithmeticError ? 1 : 2;
           return failure(
             `bash: conditional expression: ${(error as Error).message}\n`,

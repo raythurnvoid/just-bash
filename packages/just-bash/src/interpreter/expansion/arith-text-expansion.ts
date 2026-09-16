@@ -6,6 +6,7 @@
  * expand to $(( 1 + 2 * 3 )) = 7, not $(( (1+2) * 3 )) = 9.
  */
 
+import { throwIfAborted } from "../helpers/result.js";
 import type { InterpreterContext } from "../types.js";
 import { getVariable } from "./variable.js";
 
@@ -173,6 +174,7 @@ export async function expandSubscriptForAssocArray(
           const cmdResult = await ctx.execFn(cmdStr, {
             signal: ctx.state.signal,
           });
+          throwIfAborted(ctx, "", cmdResult.stderr);
           // Strip trailing newlines like command substitution does
           result += cmdResult.stdout.replace(/\n+$/, "");
           // Forward stderr to expansion stderr
@@ -222,6 +224,7 @@ export async function expandSubscriptForAssocArray(
         const cmdResult = await ctx.execFn(cmdStr, {
           signal: ctx.state.signal,
         });
+        throwIfAborted(ctx, "", cmdResult.stderr);
         result += cmdResult.stdout.replace(/\n+$/, "");
         if (cmdResult.stderr) {
           ctx.state.expansionStderr =

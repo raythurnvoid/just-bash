@@ -29,6 +29,7 @@ import { Parser } from "../parser/parser.js";
 import { ArithmeticError, NounsetError } from "./errors.js";
 import { getArrayElements, getVariable } from "./expansion.js";
 import { getArrayElement, hasArray, setArrayElement } from "./helpers/array.js";
+import { throwIfAborted } from "./helpers/result.js";
 import type { InterpreterContext } from "./types.js";
 
 interface ArithmeticResolutionContext {
@@ -455,6 +456,7 @@ async function evaluateArithmeticInternal(
         const result = await ctx.execFn(expr.command, {
           signal: ctx.state.signal,
         });
+        throwIfAborted(ctx, "", result.stderr);
         // Command substitution stderr should go to the shell's stderr at expansion time
         if (result.stderr) {
           ctx.state.expansionStderr =
@@ -964,6 +966,7 @@ async function evalConcatPartToStringAsync(
         const result = await ctx.execFn(expr.command, {
           signal: ctx.state.signal,
         });
+        throwIfAborted(ctx, "", result.stderr);
         return result.stdout.trim();
       }
       return "0";

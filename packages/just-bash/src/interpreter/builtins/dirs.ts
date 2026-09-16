@@ -130,6 +130,10 @@ export async function handlePushd(
   // Change to new directory
   ctx.state.previousDir = ctx.state.cwd;
   ctx.state.cwd = resolvedDir;
+  if (ctx.state.cwdToken) {
+    ctx.state.cwdToken = {};
+    await ctx.state.onCwdChange?.(resolvedDir, ctx.state.cwdToken);
+  }
   ctx.state.env.set("PWD", resolvedDir);
   ctx.state.env.set("OLDPWD", ctx.state.previousDir);
 
@@ -143,10 +147,10 @@ export async function handlePushd(
 /**
  * popd - Pop directory from stack and cd to it
  */
-export function handlePopd(
+export async function handlePopd(
   ctx: InterpreterContext,
   args: string[],
-): ExecResult {
+): Promise<ExecResult> {
   const stack = getStack(ctx);
 
   // Parse arguments
@@ -174,6 +178,10 @@ export function handlePopd(
   // Change to the popped directory
   ctx.state.previousDir = ctx.state.cwd;
   ctx.state.cwd = newDir;
+  if (ctx.state.cwdToken) {
+    ctx.state.cwdToken = {};
+    await ctx.state.onCwdChange?.(newDir, ctx.state.cwdToken);
+  }
   ctx.state.env.set("PWD", newDir);
   ctx.state.env.set("OLDPWD", ctx.state.previousDir);
 

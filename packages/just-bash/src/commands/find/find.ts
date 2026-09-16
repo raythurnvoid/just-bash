@@ -881,6 +881,9 @@ export const findCommand: RuntimeCommand = {
             batchExecPaths.set(action, paths);
             break;
           }
+          // An aborted exec returns at once for every remaining file, so skip
+          // them instead of starting one exec per file.
+          if (ctx.signal?.aborted) break;
           const cmdWithFile = action.command.map((part) =>
             part === "{}" ? file : part,
           );

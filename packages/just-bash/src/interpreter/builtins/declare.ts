@@ -19,6 +19,7 @@ import { parseArithmeticExpression } from "../../parser/arithmetic-parser.js";
 import { Parser } from "../../parser/parser.js";
 import type { ExecResult } from "../../types.js";
 import { evaluateArithmetic } from "../arithmetic.js";
+import { ExecutionAbortedError } from "../errors.js";
 import { applyAssignmentTildeExpansion } from "../expansion/tilde.js";
 import {
   assertArrayKeysFit,
@@ -145,7 +146,10 @@ async function evaluateIntegerValue(
     const arithAst = parseArithmeticExpression(parser, value);
     const result = await evaluateArithmetic(ctx, arithAst.expression);
     return String(result);
-  } catch {
+  } catch (error) {
+    if (error instanceof ExecutionAbortedError) {
+      throw error;
+    }
     // If parsing fails, return 0 (bash behavior for invalid expressions)
     return "0";
   }
@@ -542,7 +546,10 @@ export async function handleDeclare(
                   const parser = new Parser();
                   const arithAst = parseArithmeticExpression(parser, indexExpr);
                   index = await evaluateArithmetic(ctx, arithAst.expression);
-                } catch {
+                } catch (error) {
+                  if (error instanceof ExecutionAbortedError) {
+                    throw error;
+                  }
                   // If parsing fails, treat as 0 (like unset variable)
                   index = 0;
                 }
@@ -620,7 +627,10 @@ export async function handleDeclare(
         const parser = new Parser();
         const arithAst = parseArithmeticExpression(parser, indexExpr);
         index = await evaluateArithmetic(ctx, arithAst.expression);
-      } catch {
+      } catch (error) {
+        if (error instanceof ExecutionAbortedError) {
+          throw error;
+        }
         // If parsing fails, try to parse as simple number
         const num = parseInt(indexExpr, 10);
         index = Number.isNaN(num) ? 0 : num;

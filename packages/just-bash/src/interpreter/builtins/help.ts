@@ -62,15 +62,6 @@ const BUILTIN_HELP = new Map<string, [string, string]>([
     ],
   ],
   [
-    "bg",
-    [
-      "bg [job_spec ...]",
-      `Move jobs to the background.
-    Place the jobs identified by each JOB_SPEC in the background, as if they
-    had been started with \`&'.`,
-    ],
-  ],
-  [
     "break",
     [
       "break [n]",
@@ -223,14 +214,6 @@ const BUILTIN_HELP = new Map<string, [string, string]>([
     ],
   ],
   [
-    "disown",
-    [
-      "disown [-h] [-ar] [jobspec ...]",
-      `Remove jobs from current shell.
-    Without any JOBSPECs, remove the current job.`,
-    ],
-  ],
-  [
     "echo",
     [
       "echo [-neE] [arg ...]",
@@ -325,15 +308,6 @@ const BUILTIN_HELP = new Map<string, [string, string]>([
     ],
   ],
   [
-    "fg",
-    [
-      "fg [job_spec]",
-      `Move job to the foreground.
-    Place the job identified by JOB_SPEC in the foreground, making it the
-    current job.`,
-    ],
-  ],
-  [
     "getopts",
     [
       "getopts optstring name [arg]",
@@ -383,27 +357,6 @@ const BUILTIN_HELP = new Map<string, [string, string]>([
       `Display or manipulate the history list.
     Display the history list with line numbers, prefixing each modified
     entry with a \`*'.
-    Exit Status:
-    Returns success unless an invalid option is given or an error occurs.`,
-    ],
-  ],
-  [
-    "jobs",
-    [
-      "jobs [-lnprs] [jobspec ...] or jobs -x command [args]",
-      `Display status of jobs.
-    Lists the active jobs.
-    Exit Status:
-    Returns success unless an invalid option is given or an error occurs.`,
-    ],
-  ],
-  [
-    "kill",
-    [
-      "kill [-s sigspec | -n signum | -sigspec] pid | jobspec ... or kill -l [sigspec]",
-      `Send a signal to a job.
-    Send the processes identified by PID or JOBSPEC the signal named by
-    SIGSPEC or SIGNUM.
     Exit Status:
     Returns success unless an invalid option is given or an error occurs.`,
     ],
@@ -634,14 +587,6 @@ const BUILTIN_HELP = new Map<string, [string, string]>([
     ],
   ],
   [
-    "suspend",
-    [
-      "suspend [-f]",
-      `Suspend shell execution.
-    Suspend the execution of this shell until it receives a SIGCONT signal.`,
-    ],
-  ],
-  [
     "test",
     [
       "test [expr]",
@@ -767,18 +712,10 @@ const BUILTIN_HELP = new Map<string, [string, string]>([
     Returns success unless an invalid option is given or a NAME is read-only.`,
     ],
   ],
-  [
-    "wait",
-    [
-      "wait [-fn] [id ...]",
-      `Wait for job completion and return exit status.
-    Waits for each process identified by an ID, which may be a process ID or a
-    job specification, and reports its termination status.
-    Exit Status:
-    Returns the status of the last ID; fails if ID is invalid or an invalid
-    option is given.`,
-    ],
-  ],
+  // `wait` has no entry on purpose. The engine ships a no-op stub and a host
+  // registers its own `wait` with its own flags, so bash's `wait [-fn] [id ...]`
+  // text would describe options that do not exist here. `wait --help` is the
+  // one answer, the same way `jobs` and `kill` have no entry either.
 ]);
 
 // All builtin names for listing

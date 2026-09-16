@@ -513,7 +513,7 @@ export async function dispatchBuiltin(
     return await handlePushd(ctx, args);
   }
   if (commandName === "popd") {
-    return handlePopd(ctx, args);
+    return await handlePopd(ctx, args);
   }
   if (commandName === "dirs") {
     return handleDirs(ctx, args);
@@ -614,8 +614,8 @@ export async function dispatchBuiltin(
     );
     return { ...result, internalProducerOmitsShellPrefix: true };
   }
-  if (commandName === "wait") {
-    // wait - wait for background jobs (stub: no-op in this context)
+  // wait is a no-op stub unless the host registers a real wait command
+  if (commandName === "wait" && !ctx.commands.has("wait")) {
     return OK;
   }
   if (commandName === "type") {
@@ -986,7 +986,10 @@ export async function executeExternalCommand(
     };
   } catch (error) {
     // ExecutionLimitError must propagate - these are safety limits
-    if (error instanceof ExecutionLimitError) {
+    if (
+      error instanceof ExecutionLimitError ||
+      error instanceof ExecutionAbortedError
+    ) {
       throw error;
     }
     if (error instanceof ExecutionAbortedError) {

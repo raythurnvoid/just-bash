@@ -28,7 +28,7 @@ import { utf8ByteLength } from "../../encoding.js";
 import { type ParseException, Parser, parse } from "../../parser/parser.js";
 import type { ExecResult } from "../../types.js";
 import { matchPattern } from "../conditionals.js";
-import { ExecutionLimitError } from "../errors.js";
+import { ExecutionAbortedError, ExecutionLimitError } from "../errors.js";
 import { expandWord, getArrayElements } from "../expansion.js";
 import { callFunction } from "../functions.js";
 import {
@@ -38,7 +38,7 @@ import {
   getArray,
   hasArray,
 } from "../helpers/array.js";
-import { failure, result, success } from "../helpers/result.js";
+import { failure, result, success, throwIfAborted } from "../helpers/result.js";
 import type { InterpreterContext } from "../types.js";
 
 const preserveWordlistEscapes = (part: WordPart): WordPart => {
@@ -79,7 +79,6 @@ const SHELL_BUILTINS = [
   ":",
   "[",
   "alias",
-  "bg",
   "bind",
   "break",
   "builtin",
@@ -92,7 +91,6 @@ const SHELL_BUILTINS = [
   "continue",
   "declare",
   "dirs",
-  "disown",
   "echo",
   "enable",
   "eval",
@@ -101,13 +99,10 @@ const SHELL_BUILTINS = [
   "export",
   "false",
   "fc",
-  "fg",
   "getopts",
   "hash",
   "help",
   "history",
-  "jobs",
-  "kill",
   "let",
   "local",
   "logout",
@@ -124,7 +119,6 @@ const SHELL_BUILTINS = [
   "shift",
   "shopt",
   "source",
-  "suspend",
   "test",
   "times",
   "trap",
@@ -505,6 +499,7 @@ export async function handleCompgen(
       }
     } catch (error) {
       if (error instanceof ExecutionLimitError) throw error;
+      if (error instanceof ExecutionAbortedError) throw error;
       // Expansion errors (e.g., arithmetic division by zero) return status 1
       return result("", "", 1);
     }
@@ -599,6 +594,7 @@ export async function handleCompgen(
         appendCompletions(compreplyValues);
       } catch (error) {
         if (error instanceof ExecutionLimitError) throw error;
+        if (error instanceof ExecutionAbortedError) throw error;
         // If function execution fails, return exit code 1
         restoreEnv(ctx, savedEnv);
         restoreCompletionArray(ctx, "COMP_WORDS", savedCompWords);
@@ -625,6 +621,7 @@ export async function handleCompgen(
       // Parse and execute the command
       const ast = parse(commandString);
       const cmdResult = await ctx.executeScript(ast);
+      throwIfAborted(ctx, "", cmdResult.stderr);
 
       // Check for errors
       if (cmdResult.exitCode !== 0) {

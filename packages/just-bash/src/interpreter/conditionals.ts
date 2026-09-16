@@ -16,7 +16,7 @@ import { Parser } from "../parser/parser.js";
 import { createUserRegex } from "../regex/index.js";
 import type { ExecResult } from "../types.js";
 import { evaluateArithmetic } from "./arithmetic.js";
-import { ExecutionLimitError } from "./errors.js";
+import { ExecutionAbortedError, ExecutionLimitError } from "./errors.js";
 import {
   escapeRegexChars,
   expandWord,
@@ -868,7 +868,10 @@ async function evalArithExpr(
     const parser = new Parser();
     const arithAst = parseArithmeticExpression(parser, expr);
     return await evaluateArithmetic(ctx, arithAst.expression);
-  } catch {
+  } catch (error) {
+    if (error instanceof ExecutionAbortedError) {
+      throw error;
+    }
     // If parsing fails, try simple numeric
     return parseNumeric(expr);
   }

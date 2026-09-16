@@ -7,8 +7,13 @@
 
 import type { ScriptNode } from "../../ast/types.js";
 import { Parser } from "../../parser/parser.js";
-import { ExecutionLimitError, ExitError } from "../errors.js";
+import {
+  ExecutionAbortedError,
+  ExecutionLimitError,
+  ExitError,
+} from "../errors.js";
 import { cloneArrays } from "../helpers/array.js";
+import { throwIfAborted } from "../helpers/result.js";
 import { recordSubstitutionExit } from "../helpers/substitution-status.js";
 import type { InterpreterContext } from "../types.js";
 import { escapeGlobChars } from "./glob-escape.js";
@@ -122,7 +127,9 @@ async function executeCommandSubstitutionFromString(
   const savedEnv = new Map(ctx.state.env);
   const savedArrays = cloneArrays(ctx.state.arrays);
   const savedCwd = ctx.state.cwd;
+  const savedCwdToken = ctx.state.cwdToken;
   const savedSuppressVerbose = ctx.state.suppressVerbose;
+  const savedLastBackgroundPid = ctx.state.lastBackgroundPid;
   ctx.state.suppressVerbose = true;
 
   try {
@@ -132,21 +139,31 @@ async function executeCommandSubstitutionFromString(
     ctx.state.env = savedEnv;
     ctx.state.arrays = savedArrays;
     ctx.state.cwd = savedCwd;
+    ctx.state.cwdToken = savedCwdToken;
     ctx.state.suppressVerbose = savedSuppressVerbose;
+    ctx.state.lastBackgroundPid = savedLastBackgroundPid;
     recordSubstitutionExit(ctx.state, exitCode);
+    ctx.state.bashPid = savedBashPid;
+    // The nested script may have returned normally while the exec was
+    // aborted. Stop here before the caller uses the output.
+    throwIfAborted(ctx, "", result.stderr);
     if (result.stderr) {
       ctx.state.expansionStderr =
         (ctx.state.expansionStderr || "") + result.stderr;
     }
-    ctx.state.bashPid = savedBashPid;
     return result.stdout.replace(/\n+$/, "");
   } catch (error) {
     ctx.state.env = savedEnv;
     ctx.state.arrays = savedArrays;
     ctx.state.cwd = savedCwd;
+    ctx.state.cwdToken = savedCwdToken;
     ctx.state.bashPid = savedBashPid;
     ctx.state.suppressVerbose = savedSuppressVerbose;
-    if (error instanceof ExecutionLimitError) {
+    ctx.state.lastBackgroundPid = savedLastBackgroundPid;
+    if (
+      error instanceof ExecutionLimitError ||
+      error instanceof ExecutionAbortedError
+    ) {
       throw error;
     }
     if (error instanceof ExitError) {

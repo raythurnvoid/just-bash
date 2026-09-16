@@ -14,7 +14,12 @@ import { Parser } from "../parser/parser.js";
 import type { ExecResult } from "../types.js";
 import { evaluateArithmetic } from "./arithmetic.js";
 import { applyCaseTransform, isInteger } from "./builtins/index.js";
-import { ArithmeticError, ExecutionLimitError, ExitError } from "./errors.js";
+import {
+  ArithmeticError,
+  ExecutionAbortedError,
+  ExecutionLimitError,
+  ExitError,
+} from "./errors.js";
 import { applyAssignmentTildeExpansion } from "./expansion/tilde.js";
 import {
   expandWord,
@@ -523,7 +528,10 @@ async function processIndexedArrayWithKeysAssignment(
         const parser = new Parser();
         const arithAst = parseArithmeticExpression(parser, pending.indexExpr);
         index = await evaluateArithmetic(ctx, arithAst.expression, false);
-      } catch {
+      } catch (error) {
+        if (error instanceof ExecutionAbortedError) {
+          throw error;
+        }
         if (/^-?\d+$/.test(pending.indexExpr)) {
           index = Number.parseInt(pending.indexExpr, 10);
         } else {
@@ -747,6 +755,7 @@ export async function computeIndexedArrayIndex(
       index = await evaluateArithmetic(ctx, arithAst.expression, false);
     } catch (e) {
       if (e instanceof ExitError) throw e;
+      if (e instanceof ExecutionAbortedError) throw e;
       if (e instanceof ArithmeticError) {
         const lineNum = ctx.state.currentLine;
         const errorMsg = `bash: line ${lineNum}: ${subscriptExpr}: ${e.message}\n`;
@@ -872,7 +881,10 @@ async function processScalarAssignment(
         const arithAst = parseArithmeticExpression(parser, value);
         finalValue = String(await evaluateArithmetic(ctx, arithAst.expression));
       }
-    } catch {
+    } catch (error) {
+      if (error instanceof ExecutionAbortedError) {
+        throw error;
+      }
       finalValue = "0";
     }
   } else {
@@ -942,7 +954,10 @@ async function computeNamerefArrayKey(
       const parser = new Parser();
       const arithAst = parseArithmeticExpression(parser, subscriptExpr);
       index = await evaluateArithmetic(ctx, arithAst.expression, false);
-    } catch {
+    } catch (error) {
+      if (error instanceof ExecutionAbortedError) {
+        throw error;
+      }
       const varValue = ctx.state.env.get(subscriptExpr);
       index = varValue ? Number.parseInt(varValue, 10) : 0;
     }
