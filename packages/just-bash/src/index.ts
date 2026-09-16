@@ -81,6 +81,10 @@ export {
 } from "./fs/read-write-fs/index.js";
 export type { InterpreterStateSnapshot } from "./interpreter/state-snapshot.js";
 export type {
+  StatementBoundary,
+  StatementBoundaryDecision,
+} from "./interpreter/statement-boundary.js";
+export type {
   AllowedUrl,
   AllowedUrlEntry,
   NetworkConfig,

@@ -21,6 +21,10 @@ import type {
 } from "../types.js";
 import type { ProcessSubstitutionEntry } from "./process-substitution.js";
 import type { BackgroundLaunch, BackgroundResult } from "./state-snapshot.js";
+import type {
+  StatementBoundary,
+  StatementBoundaryDecision,
+} from "./statement-boundary.js";
 
 export type InterpreterExecOptions = Omit<CommandExecOptions, "cwd"> & {
   cwd?: string;
@@ -469,6 +473,13 @@ export interface InterpreterState
    * Bash instance, so a nested exec (`bash -c 'cmd &'`) runs its `&` inline.
    */
   onBackground?: (launch: BackgroundLaunch) => Promise<BackgroundResult>;
+  /**
+   * Host hook called before each top-level statement. Set per exec like
+   * `onBackground`; a nested exec, `eval` and `source` never fire it.
+   */
+  onStatementBoundary?: (
+    boundary: StatementBoundary,
+  ) => Promise<StatementBoundaryDecision> | StatementBoundaryDecision;
 }
 
 export interface ShellArray {

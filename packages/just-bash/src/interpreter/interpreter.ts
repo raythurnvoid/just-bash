@@ -110,6 +110,7 @@ import {
 } from "./redirections.js";
 import { processAssignments } from "./simple-command-assignments.js";
 import { snapshotInterpreterState } from "./state-snapshot.js";
+import { bareSleepMs, boundaryStatements } from "./statement-boundary.js";
 import {
   executeGroup as executeGroupHelper,
   executeSubshell as executeSubshellHelper,
@@ -183,6 +184,12 @@ export interface InterpreterOptions {
 
 export class Interpreter {
   private ctx: InterpreterContext;
+  /**
+   * Nesting of `executeScript` calls. `eval`, `source` and `compgen` run a
+   * script inside a statement of the outer one; only depth 1 is the exec's
+   * own script, and only its statements are boundaries for the host.
+   */
+  private scriptDepth = 0;
 
   constructor(options: InterpreterOptions, state: InterpreterState) {
     this.ctx = {
@@ -264,6 +271,15 @@ export class Interpreter {
   }
 
   async executeScript(node: ScriptNode): Promise<ExecResult> {
+    this.scriptDepth++;
+    try {
+      return await this.executeScriptStatements(node);
+    } finally {
+      this.scriptDepth--;
+    }
+  }
+
+  private async executeScriptStatements(node: ScriptNode): Promise<ExecResult> {
     this.assertDefenseContext("execution");
 
     let exitCode = 0;
@@ -272,7 +288,32 @@ export class Interpreter {
       "script",
     );
 
-    for (const statement of node.statements) {
+    // The host hook sees the exec's own statements. Without the source text of
+    // every one of them the host could not run the rest later, so the hook is
+    // skipped for a script a transform plugin built without source text.
+    const hook =
+      this.scriptDepth === 1 ? this.ctx.state.onStatementBoundary : undefined;
+    const statements = hook
+      ? boundaryStatements(node.statements)
+      : node.statements;
+    const texts = statements.map((statement) => statement.sourceText);
+    const boundaries =
+      hook && texts.every((text) => text !== undefined)
+        ? { hook, texts: texts as string[] }
+        : null;
+
+    for (let index = 0; index < statements.length; index++) {
+      const statement = statements[index];
+      if (boundaries) {
+        const decision = await boundaries.hook({
+          script: boundaries.texts[index],
+          remainingScript: () => boundaries.texts.slice(index).join("\n"),
+          scriptAfter: () => boundaries.texts.slice(index + 1).join("\n"),
+          sleepMs: bareSleepMs(statement),
+          snapshot: () => snapshotInterpreterState(this.ctx.state),
+        });
+        if (decision === "stop") break;
+      }
       try {
         const result = await this.executeStatement(statement);
         // Decode each statement's stdout to text via its explicit `stdoutKind`

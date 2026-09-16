@@ -60,6 +60,10 @@ import {
   restoreInterpreterState,
   snapshotInterpreterState,
 } from "./interpreter/state-snapshot.js";
+import type {
+  StatementBoundary,
+  StatementBoundaryDecision,
+} from "./interpreter/statement-boundary.js";
 import {
   type ExecutionLimitProfile,
   type ExecutionLimits,
@@ -339,6 +343,18 @@ export interface ExecOptions {
    * exit 0) or null (exit 1). Per exec only: a nested exec has no hook.
    */
   onBackground?: (launch: BackgroundLaunch) => Promise<BackgroundResult>;
+  /**
+   * Host hook called before each top-level statement with the statement
+   * text, the text still to run and a lazy state snapshot. `stop` ends the
+   * exec before that statement, with the output the earlier statements
+   * produced; the host can run the remaining text later with `restoreState`.
+   * A script that is one bare `{ ...; }` group hands over its body
+   * statements. Per exec only: a nested exec, `eval` and `source` never
+   * fire it.
+   */
+  onStatementBoundary?: (
+    boundary: StatementBoundary,
+  ) => Promise<StatementBoundaryDecision> | StatementBoundaryDecision;
   /**
    * Seed this exec's state from a snapshot taken by an earlier exec
    * (variables, options, attributes, functions, cd history). PWD is set to
@@ -832,6 +848,7 @@ export class Bash {
         extraArgs: effectiveOptions.args,
         // Per-exec background hook, never inherited by a nested exec
         onBackground: effectiveOptions.onBackground,
+        onStatementBoundary: effectiveOptions.onStatementBoundary,
       };
 
       // Seed the exec state from an earlier snapshot. The snapshot env
