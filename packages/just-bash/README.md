@@ -188,6 +188,73 @@ await bash.exec("date"); // Mon Jun  1 09:30:00 EDT 2026
 | `signal` | `AbortSignal` | Cooperative cancellation; stops at next statement boundary |
 | `rawScript` | `boolean` | Skip leading-whitespace normalization (default: `false`) |
 
+### Host work between plain commands
+
+The per-exec `onPlainCommand` hook can suspend a direct trusted custom command.
+It runs after argument expansion and normal command lookup, but before the
+command callback starts. Lookup happens once. Return `"run"` to use the normal
+callback, or `"suspend"` to return a `BashHostSuspension` without an `exitCode`.
+Ordinary `exec()` calls still return `BashExecResult`.
+
+```typescript
+const bash = new Bash();
+
+const outcome = await bash.exec("hello Alice; echo done", {
+  onPlainCommand: ({ continuation }) =>
+    continuation.command === "hello" ? "suspend" : "run",
+});
+
+if (!("exitCode" in outcome)) {
+  // Storing the continuation and running the real work are host-owned steps,
+  // not just-bash APIs. Resume delivers the result the host recorded.
+  const resumed = await bash.resumePlainCommand(outcome.continuation, {
+    stdout: "hello Alice\n",
+    stderr: "",
+    exitCode: 0,
+  });
+}
+```
+
+The continuation contains expanded `command` and `args`, `cwd`, the shell
+snapshot, `lastArg`, and `scriptAfter`. Argument side effects have already run.
+Never replay the original command text. Resume delivers only the real result
+through the normal pipeline and statement rules. It updates `$?`, `PIPESTATUS`,
+and `$_`, and applies `set -e` before later statements. An empty `scriptAfter`
+still delivers the result. A new `Bash` instance can resume with the same
+filesystem and command setup.
+
+This is not a saved shell call stack. Eligibility is limited to one direct
+literal command in a top-level statement. A script that is one bare `{ ...; }`
+group can expose its body statements, as with the existing background hook.
+Pipelines, `&&`/`||`, loops, conditions, functions, aliases, PATH scripts,
+nested shells, `eval`, `source`, wrappers such as `command`, prefix assignments,
+redirections, negation, timing, and dynamic command names cannot suspend.
+Open descriptors, process substitutions, and nonempty shell input also block
+suspension. Such commands keep their normal bounded behavior. Calls inside
+argument substitutions never inherit the outer command's eligibility.
+
+Each eligible call has a fresh in-memory `token`. It is not a stored job ID.
+The hook shares the command deadline. It receives a cancellation `signal` only
+when `exec` was given a `signal`; pass one if the hook does slow work.
+A thrown hook error stops execution; later statements do not run. Scope
+cleanup runs before the suspension is returned. Cleanup failure or cancellation
+can turn it into a terminal error. Hosts must cancel or reconcile work that was
+already started; a pending host promise is not a guarantee of completion.
+
+The host owns durable storage, job admission, retry keys, and once-only delivery
+of the stored result. Calling `resumePlainCommand()` twice runs the remainder
+twice. Supply `onPlainCommand` again on resume to allow another suspension.
+Neither this hook nor its token is inherited by nested execution.
+
+Output before suspension is returned and streamed once. Resume returns and
+streams the stored result plus new output; it does not replay earlier output.
+Stored output gets a fresh budget charge, with no old accounting credit.
+Each resume creates a new execution scope. The host must enforce limits across
+the whole job, including total output, work, and wall-clock time. Snapshots do
+not save open descriptors, command counters, or the command hash table. The
+remaining source is parsed again, so source line numbers start again.
+`onExecEnd` runs only for a terminal result, not a suspension.
+
 ## Filesystem Options
 
 Four filesystem implementations:

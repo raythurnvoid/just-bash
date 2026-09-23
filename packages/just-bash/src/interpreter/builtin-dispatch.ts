@@ -759,6 +759,7 @@ export async function executeExternalCommand(
   args: string[],
   stdin: string,
   useDefaultPath: boolean,
+  beforeExecute?: (signal: AbortSignal | undefined) => Promise<void>,
 ): Promise<ExecResult> {
   const { ctx, buildExportedEnv, executeUserScript } = dispatchCtx;
 
@@ -955,13 +956,24 @@ export async function executeExternalCommand(
     revokeOriginalCommandContext();
   };
 
+  // The callback belongs to this direct call only. Wrappers and nested execs
+  // never receive it, and PATH scripts have already taken their own branch.
+  let boundaryPending = Boolean(
+    beforeExecute && cmd.trusted && cmd.internalIsExtension,
+  );
   try {
     const runCommand = (): Promise<ExecResult> =>
       awaitWithDefenseContext(
         ctx.requireDefenseContext,
         "command",
         `${commandName} execution`,
-        () => cmd.execute(args, guardedCmdCtx),
+        async () => {
+          if (boundaryPending && beforeExecute) {
+            await beforeExecute(guardedCmdCtx.signal);
+            boundaryPending = false;
+          }
+          return cmd.execute(args, guardedCmdCtx);
+        },
       );
 
     const runBoundedCommand = () =>
@@ -985,6 +997,9 @@ export async function executeExternalCommand(
         (stdinAccessed ? stdin.length : 0),
     };
   } catch (error) {
+    // A checkpoint failure or suspension cannot become a normal command
+    // failure: without set -e that would allow later statements to write.
+    if (boundaryPending) throw error;
     // ExecutionLimitError must propagate - these are safety limits
     if (
       error instanceof ExecutionLimitError ||

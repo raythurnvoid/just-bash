@@ -7,10 +7,20 @@
  * snapshot, and answers `run` or `stop`. `stop` ends the exec before the
  * statement, with the output the earlier statements produced. The host can
  * run the remaining text later with `restoreState`.
+ *
+ * `onPlainCommand` instead runs after expansion and normal lookup, before a
+ * direct trusted command starts. It returns a separate host suspension, not
+ * a shell exit status. Resume delivers a result without replaying expansion.
  */
 
-import type { CommandNode, StatementNode, WordNode } from "../ast/types.js";
+import type {
+  CommandNode,
+  SimpleCommandNode,
+  StatementNode,
+  WordNode,
+} from "../ast/types.js";
 import { parseDuration } from "../commands/duration.js";
+import type { BashExecResult, ExecResult } from "../types.js";
 import type { InterpreterStateSnapshot } from "./state-snapshot.js";
 
 /** What the boundary hook receives before one top-level statement. */
@@ -34,6 +44,64 @@ export interface StatementBoundary {
 
 /** `run` runs the statement. `stop` ends the exec before it. */
 export type StatementBoundaryDecision = "run" | "stop";
+
+/**
+ * Stored state after expansion, before a trusted command starts.
+ * The host owns durable receipts and must never replay the original statement.
+ */
+export interface PlainCommandContinuation {
+  command: string;
+  args: string[];
+  cwd: string;
+  snapshot: InterpreterStateSnapshot;
+  scriptAfter: string;
+  lastArg: string;
+}
+
+/**
+ * One direct command. The token is local to this call, not a durable receipt.
+ */
+export interface PlainCommandBoundary {
+  token: object;
+  continuation: PlainCommandContinuation;
+  signal?: AbortSignal;
+}
+
+/**
+ * Only the host can opt a resolved trusted command into suspension.
+ */
+export type PlainCommandHook = (
+  boundary: PlainCommandBoundary,
+) => "run" | "suspend" | Promise<"run" | "suspend">;
+
+/**
+ * A suspended exec has no shell exit status and has not finished.
+ */
+export interface BashHostSuspension {
+  kind: "host_suspended";
+  stdout: string;
+  stderr: string;
+  continuation: PlainCommandContinuation;
+  cwd?: { path: string; token: object };
+}
+
+export type BashRunOutcome = BashExecResult | BashHostSuspension;
+
+/**
+ * A real command result, without accounting credit from an earlier exec.
+ */
+export type PlainCommandResult = Pick<
+  ExecResult,
+  "stdout" | "stderr" | "exitCode" | "stdoutKind" | "stdoutEncoding"
+>;
+
+/**
+ * Interpreter input for completing one command without expansion or dispatch.
+ */
+export interface PlainCommandCompletion {
+  lastArg: string;
+  result: PlainCommandResult;
+}
 
 /**
  * The statements the hook sees. A script that is one bare `{ ...; }` group
@@ -76,6 +144,26 @@ export function bareSleepMs(statement: StatementNode): number | null {
     totalMs += ms;
   }
   return totalMs;
+}
+
+/**
+ * Only a direct literal command can continue without a saved shell call stack.
+ * Live descriptors and process substitutions are checked after expansion too.
+ */
+export function plainCommandNode(
+  statement: StatementNode,
+): SimpleCommandNode | null {
+  const command = soleCommand(statement);
+  if (
+    !command ||
+    command.type !== "SimpleCommand" ||
+    !command.name ||
+    command.assignments.length > 0 ||
+    command.redirections.length > 0 ||
+    literalWord(command.name) === null
+  )
+    return null;
+  return command;
 }
 
 /** The one command of a statement that is one plain pipeline of one command. */

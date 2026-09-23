@@ -22,6 +22,7 @@ import type {
 import type { ProcessSubstitutionEntry } from "./process-substitution.js";
 import type { BackgroundLaunch, BackgroundResult } from "./state-snapshot.js";
 import type {
+  PlainCommandHook,
   StatementBoundary,
   StatementBoundaryDecision,
 } from "./statement-boundary.js";
@@ -480,6 +481,10 @@ export interface InterpreterState
   onStatementBoundary?: (
     boundary: StatementBoundary,
   ) => Promise<StatementBoundaryDecision> | StatementBoundaryDecision;
+  /**
+   * Per-exec host hook, reached only by an eligible direct command.
+   */
+  onPlainCommand?: PlainCommandHook;
 }
 
 export interface ShellArray {

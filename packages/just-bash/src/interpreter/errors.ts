@@ -12,6 +12,7 @@
  * as they propagate through the execution stack.
  */
 import { utf8ByteLength } from "../encoding.js";
+import type { PlainCommandContinuation } from "./statement-boundary.js";
 
 /**
  * Base class for all control flow errors.
@@ -35,6 +36,19 @@ export abstract class ControlFlowError extends Error {
     this.stderr = stderr + this.stderr;
     this.internalOutputAccounting.stdout += utf8ByteLength(stdout);
     this.internalOutputAccounting.stderr += utf8ByteLength(stderr);
+  }
+}
+
+/**
+ * Leaves only the top-level host-enabled exec, without a command exit status.
+ */
+export class PlainCommandSuspension extends ControlFlowError {
+  constructor(
+    public readonly continuation: PlainCommandContinuation,
+    stderr: string,
+    public readonly cwdToken?: object,
+  ) {
+    super("host suspension", "", stderr);
   }
 }
 

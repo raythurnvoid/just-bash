@@ -32,6 +32,7 @@ import type { IFileSystem } from "../fs/interface.js";
 import { mapToRecord } from "../helpers/env.js";
 import type { ExecutionLimits } from "../limits.js";
 import type { SecureFetch } from "../network/index.js";
+import { parse } from "../parser/parser.js";
 import { ParseException } from "../parser/types.js";
 import {
   DefenseInDepthBox,
@@ -76,6 +77,7 @@ import {
   ExitError,
   GlobError,
   NounsetError,
+  PlainCommandSuspension,
   PosixFatalError,
   ReturnError,
 } from "./errors.js";
@@ -111,7 +113,12 @@ import {
 } from "./redirections.js";
 import { processAssignments } from "./simple-command-assignments.js";
 import { snapshotInterpreterState } from "./state-snapshot.js";
-import { bareSleepMs, boundaryStatements } from "./statement-boundary.js";
+import {
+  bareSleepMs,
+  boundaryStatements,
+  type PlainCommandCompletion,
+  plainCommandNode,
+} from "./statement-boundary.js";
 import {
   executeGroup as executeGroupHelper,
   executeSubshell as executeSubshellHelper,
@@ -156,6 +163,7 @@ export interface InterpreterOptions {
   commands: CommandRegistry;
   limits: Required<ExecutionLimits>;
   executionScope: ExecutionScope;
+  plainCommandCompletion?: PlainCommandCompletion;
   exec: (
     script: string,
     options?: InterpreterExecOptions,
@@ -191,8 +199,16 @@ export class Interpreter {
    * own script, and only its statements are boundaries for the host.
    */
   private scriptDepth = 0;
+  private plainCommand: {
+    node: SimpleCommandNode;
+    token: object;
+    scriptAfter: () => string;
+  } | null = null;
+  private completion: PlainCommandCompletion | undefined;
+  private completionNode: CommandNode | undefined;
 
   constructor(options: InterpreterOptions, state: InterpreterState) {
+    this.completion = options.plainCommandCompletion;
     this.ctx = {
       state,
       fs: options.fs,
@@ -272,11 +288,13 @@ export class Interpreter {
   }
 
   async executeScript(node: ScriptNode): Promise<ExecResult> {
+    const savedPlainCommand = this.plainCommand;
     this.scriptDepth++;
     try {
       return await this.executeScriptStatements(node);
     } finally {
       this.scriptDepth--;
+      this.plainCommand = savedPlainCommand;
     }
   }
 
@@ -294,18 +312,40 @@ export class Interpreter {
     // skipped for a script a transform plugin built without source text.
     const hook =
       this.scriptDepth === 1 ? this.ctx.state.onStatementBoundary : undefined;
-    const statements = hook
-      ? boundaryStatements(node.statements)
-      : node.statements;
+    const plainHook =
+      this.scriptDepth === 1 ? this.ctx.state.onPlainCommand : undefined;
+    let statements =
+      hook || plainHook ? boundaryStatements(node.statements) : node.statements;
+    if (this.scriptDepth === 1 && this.completion) {
+      // This node only returns the stored result. It never expands or dispatches.
+      const statement = parse("true").statements[0];
+      statement.sourceText = "";
+      this.completionNode = statement.pipelines[0].commands[0];
+      statements = [statement, ...statements];
+    }
     const texts = statements.map((statement) => statement.sourceText);
+    const hasSourceText = texts.every((text) => text !== undefined);
     const boundaries =
-      hook && texts.every((text) => text !== undefined)
-        ? { hook, texts: texts as string[] }
-        : null;
+      hook && hasSourceText ? { hook, texts: texts as string[] } : null;
 
     for (let index = 0; index < statements.length; index++) {
       const statement = statements[index];
-      if (boundaries) {
+      const completing =
+        statement.pipelines[0]?.commands[0] === this.completionNode;
+      if (this.scriptDepth === 1) {
+        const directNode =
+          plainHook && !completing && hasSourceText
+            ? plainCommandNode(statement)
+            : null;
+        this.plainCommand = directNode
+          ? {
+              node: directNode,
+              token: Object.freeze(Object.create(null) as object),
+              scriptAfter: () => texts.slice(index + 1).join("\n"),
+            }
+          : null;
+      }
+      if (boundaries && !completing) {
         const decision = await boundaries.hook({
           script: boundaries.texts[index],
           remainingScript: () => boundaries.texts.slice(index).join("\n"),
@@ -328,6 +368,10 @@ export class Interpreter {
         this.ctx.state.lastExitCode = exitCode;
         this.ctx.state.env.set("?", String(exitCode));
       } catch (error) {
+        if (error instanceof PlainCommandSuspension) {
+          output.prependTo(error);
+          throw error;
+        }
         // ExitError always propagates up to terminate the script
         // This allows 'eval exit 42' and 'source exit.sh' to exit properly
         if (error instanceof ExitError) {
@@ -689,8 +733,11 @@ export class Interpreter {
   }
 
   private async executePipeline(node: PipelineNode): Promise<ExecResult> {
-    return executePipelineHelper(this.ctx, node, (cmd, stdin) =>
-      this.executeCommand(cmd, stdin),
+    return executePipelineHelper(
+      this.ctx,
+      node,
+      (cmd, stdin) => this.executeCommand(cmd, stdin),
+      this.completionNode,
     );
   }
 
@@ -772,12 +819,22 @@ export class Interpreter {
     stdin: string,
   ): Promise<ExecResult> {
     let transaction: RedirectionTransaction | undefined;
+    // Expansion stderr belongs to this direct command. Hold it until the
+    // command result or suspension so nested output is not streamed twice.
+    const releaseStderr =
+      this.plainCommand?.node === node
+        ? this.ctx.executionScope.captureOutput({ stdout: false, stderr: true })
+        : undefined;
     try {
       return await this.executeSimpleCommandInner(node, stdin, (created) => {
         transaction = created;
       });
     } catch (error) {
       transaction?.finish();
+      if (error instanceof PlainCommandSuspension) {
+        releaseStderr?.();
+        this.ctx.executionScope.emitOutput("stderr", error.stderr);
+      }
       if (error instanceof GlobError) {
         // GlobError from failglob should return exit code 1 with error message
         return failure(error.stderr);
@@ -785,6 +842,8 @@ export class Interpreter {
       // ArithmeticError in expansion (e.g., echo $((42x))) should terminate the script
       // Let the error propagate - it will be caught by the top-level error handler
       throw error;
+    } finally {
+      releaseStderr?.();
     }
   }
 
@@ -793,6 +852,13 @@ export class Interpreter {
     stdin: string,
     onTransaction: (transaction: RedirectionTransaction) => void,
   ): Promise<ExecResult> {
+    if (node === this.completionNode && this.completion) {
+      const completion = this.completion;
+      this.completion = undefined;
+      this.completionNode = undefined;
+      this.ctx.state.lastArg = completion.lastArg;
+      return { ...completion.result };
+    }
     // Update currentLine for $LINENO
     if (node.line !== undefined) {
       this.ctx.state.currentLine = node.line;
@@ -1147,6 +1213,57 @@ export class Interpreter {
       }
     };
 
+    // Consume eligibility once, after expansion. A nested call never receives
+    // this callback, even if it runs while the host is writing a checkpoint.
+    const directCommand =
+      this.plainCommand?.node === node ? this.plainCommand : null;
+    if (directCommand) this.plainCommand = null;
+    const plainHook = this.ctx.state.onPlainCommand;
+    let preparedStderrBytes = 0;
+    const beforeExecute =
+      directCommand &&
+      plainHook &&
+      (this.ctx.state.fileDescriptors?.size ?? 0) === 0 &&
+      markProcessSubstitutions(this.ctx) === 0 &&
+      !stdin &&
+      !this.ctx.state.groupStdin
+        ? async (signal: AbortSignal | undefined) => {
+            const stderr =
+              (this.ctx.state.expansionStderr || "") +
+              xtraceAssignmentOutput +
+              xtraceOutput;
+            preparedStderrBytes = this.ctx.executionScope.appendOutput(
+              "stderr",
+              stderr,
+              "plain command",
+            );
+            const continuation = {
+              command: commandName,
+              args: [...args],
+              cwd: this.ctx.state.cwd,
+              snapshot: snapshotInterpreterState(this.ctx.state),
+              scriptAfter: directCommand.scriptAfter(),
+              lastArg: args[args.length - 1] ?? commandName,
+            };
+            const decision = await plainHook({
+              token: directCommand.token,
+              continuation,
+              signal,
+            });
+            this.ctx.executionScope.throwIfAborted("plain command");
+            if (decision === "suspend") {
+              this.ctx.state.expansionStderr = "";
+              const suspension = new PlainCommandSuspension(
+                continuation,
+                stderr,
+                this.ctx.state.cwdToken,
+              );
+              suspension.internalOutputAccounting.stderr = preparedStderrBytes;
+              throw suspension;
+            }
+          }
+        : undefined;
+
     let cmdResult: ExecResult;
     let controlFlowError: BreakError | ContinueError | null = null;
 
@@ -1170,6 +1287,7 @@ export class Interpreter {
         false,
         stdinSourceFd,
         stdinRedirected,
+        beforeExecute,
       );
     } catch (error) {
       // For break/continue, we still need to apply redirections before propagating
@@ -1254,6 +1372,15 @@ export class Interpreter {
       this.ctx.state.expansionStderr = "";
     }
 
+    if (preparedStderrBytes) {
+      cmdResult.internalOutputAccounting = {
+        stdout: cmdResult.internalOutputAccounting?.stdout ?? 0,
+        stderr:
+          (cmdResult.internalOutputAccounting?.stderr ?? 0) +
+          preparedStderrBytes,
+      };
+    }
+
     return cmdResult;
   }
 
@@ -1266,6 +1393,7 @@ export class Interpreter {
     useDefaultPath = false,
     stdinSourceFd = -1,
     stdinRedirected = false,
+    beforeExecute?: (signal: AbortSignal | undefined) => Promise<void>,
   ): Promise<ExecResult> {
     const dispatchCtx: BuiltinDispatchContext = {
       ctx: this.ctx,
@@ -1300,6 +1428,7 @@ export class Interpreter {
       args,
       stdin,
       useDefaultPath,
+      beforeExecute,
     );
     return { ...externalResult, internalProducerCommand: commandName };
   }

@@ -12,6 +12,7 @@ export type {
   BashOptions,
   ExecOptions,
   JavaScriptConfig,
+  PlainCommandExecOptions,
 } from "./Bash.js";
 export { Bash } from "./Bash.js";
 export type {
@@ -81,6 +82,12 @@ export {
 } from "./fs/read-write-fs/index.js";
 export type { InterpreterStateSnapshot } from "./interpreter/state-snapshot.js";
 export type {
+  BashHostSuspension,
+  BashRunOutcome,
+  PlainCommandBoundary,
+  PlainCommandContinuation,
+  PlainCommandHook,
+  PlainCommandResult,
   StatementBoundary,
   StatementBoundaryDecision,
 } from "./interpreter/statement-boundary.js";

@@ -38,6 +38,7 @@ export async function executePipeline(
   ctx: InterpreterContext,
   node: PipelineNode,
   executeCommand: ExecuteCommandFn,
+  completedCommand?: CommandNode,
 ): Promise<ExecResult> {
   // Record start time for timed pipelines
   const startTime = node.timed ? _performanceNow() : 0;
@@ -110,7 +111,12 @@ export async function executePipeline(
           stderr: node.pipeStderr?.[i] ?? false,
         });
     try {
-      ctx.state.commandCount = ctx.executionScope.chargeCommand();
+      // A stored result finishes an already-counted command; it is not a new one.
+      if (command !== completedCommand) {
+        ctx.state.commandCount = ctx.executionScope.chargeCommand();
+      } else {
+        ctx.executionScope.throwIfAborted();
+      }
       result = await executeCommand(command, stdin);
       // A stage that ended while the exec was aborted returns a plain result
       // (`sleep` returns 0). Stop before the next stage runs. A non-last

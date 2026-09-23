@@ -41,6 +41,7 @@ import {
   ExecutionAbortedError,
   ExecutionLimitError,
   ExitError,
+  PlainCommandSuspension,
   PosixFatalError,
 } from "./interpreter/errors.js";
 import { cloneArrays } from "./interpreter/helpers/array.js";
@@ -61,6 +62,11 @@ import {
   snapshotInterpreterState,
 } from "./interpreter/state-snapshot.js";
 import type {
+  BashRunOutcome,
+  PlainCommandCompletion,
+  PlainCommandContinuation,
+  PlainCommandHook,
+  PlainCommandResult,
   StatementBoundary,
   StatementBoundaryDecision,
 } from "./interpreter/statement-boundary.js";
@@ -369,6 +375,13 @@ export interface ExecOptions {
   onExecEnd?: (snapshot: InterpreterStateSnapshot) => void;
 }
 
+/**
+ * Opt in to a host suspension result. Nested execs never inherit this hook.
+ */
+export interface PlainCommandExecOptions extends ExecOptions {
+  onPlainCommand: PlainCommandHook;
+}
+
 export class Bash {
   readonly fs: IFileSystem;
   private commands: CommandRegistry = new Map();
@@ -675,19 +688,73 @@ export class Bash {
 
   exec(
     commandLine: string,
+    options: PlainCommandExecOptions,
+  ): Promise<BashRunOutcome>;
+  exec(
+    commandLine: string,
     options: ExecOptions & { cwdToken: object },
   ): Promise<BashExecResult & { cwd: { path: string; token: object } }>;
   exec(commandLine: string, options?: ExecOptions): Promise<BashExecResult>;
-  async exec(
+  exec(
     commandLine: string,
-    options?: ExecOptions,
-  ): Promise<BashExecResult> {
+    options?: ExecOptions | PlainCommandExecOptions,
+  ): Promise<BashRunOutcome> {
+    return this.execute(commandLine, options);
+  }
+
+  /**
+   * Complete one stored command, then run only its remaining script.
+   * The host must fence delivery; calling this twice would run the rest twice.
+   */
+  resumePlainCommand(
+    continuation: PlainCommandContinuation,
+    result: PlainCommandResult,
+    options?: Omit<
+      ExecOptions,
+      | "cwd"
+      | "restoreState"
+      | "env"
+      | "replaceEnv"
+      | "args"
+      | "stdin"
+      | "stdinKind"
+    > & {
+      onPlainCommand?: PlainCommandHook;
+    },
+  ): Promise<BashRunOutcome> {
+    return this.execute(
+      continuation.scriptAfter,
+      {
+        ...options,
+        cwd: continuation.cwd,
+        restoreState: continuation.snapshot,
+        rawScript: true,
+      },
+      {
+        lastArg: continuation.lastArg,
+        // Never carry output credit from another execution scope.
+        result: {
+          stdout: result.stdout,
+          stderr: result.stderr,
+          exitCode: result.exitCode,
+          stdoutKind: result.stdoutKind,
+          stdoutEncoding: result.stdoutEncoding,
+        },
+      },
+    );
+  }
+
+  private async execute(
+    commandLine: string,
+    options?: ExecOptions & { onPlainCommand?: PlainCommandHook },
+    completion?: PlainCommandCompletion,
+  ): Promise<BashRunOutcome> {
     const executionScope = new ExecutionScope(
       this.limits,
       options?.signal,
       this.onOutputFn,
     );
-    let result: BashExecResult;
+    let result: BashRunOutcome;
     try {
       result = await this.execInScope(
         commandLine,
@@ -697,40 +764,86 @@ export class Bash {
         options?.signal,
         false, // stdinAlreadyAccounted
         false, // defer result logging until cleanup finalizes the result
+        completion,
       );
     } catch (error) {
-      // Cleanup must not hide the original execution failure.
-      try {
-        await executionScope.close();
-      } catch {
-        // The execution error remains the more useful and compatible failure.
+      if (error instanceof PlainCommandSuspension) {
+        result = {
+          kind: "host_suspended",
+          stdout: error.stdout,
+          stderr: error.stderr,
+          continuation: error.continuation,
+          ...(error.cwdToken && {
+            cwd: { path: error.continuation.cwd, token: error.cwdToken },
+          }),
+        };
+      } else {
+        // Cleanup must not hide the original execution failure.
+        try {
+          await executionScope.close();
+        } catch {
+          // The execution error remains the more useful failure.
+        }
+        throw error;
       }
-      throw error;
     }
 
-    let finalResult = result;
+    let cleanupFailed = false;
     try {
       await executionScope.close();
     } catch {
-      // Cleanup callbacks are extension code. Convert their failure into a
-      // shell result so Bash.exec() keeps its result-oriented error contract.
+      cleanupFailed = true;
+    }
+    let finalResult = result;
+    const exitCode = cleanupFailed
+      ? 126
+      : !("exitCode" in result) && options?.signal?.aborted
+        ? 124
+        : null;
+    if (exitCode !== null) {
+      const env =
+        "exitCode" in result
+          ? result.env
+          : mapToRecord(
+              new Map(
+                result.continuation.snapshot.env.map(({ name, value }) => [
+                  name,
+                  value,
+                ]),
+              ),
+            );
+      if (!("exitCode" in result)) {
+        env["?"] = String(exitCode);
+        options?.onExecEnd?.({
+          ...result.continuation.snapshot,
+          env: Object.entries(env).map(([name, value]) => ({ name, value })),
+          lastExitCode: exitCode,
+        });
+      }
+      // Cleanup failure or a late Abort is terminal, never a mixed suspension.
       finalResult = {
-        ...result,
-        stderr: `${result.stderr}bash: execution cleanup failed\n`,
-        exitCode: 126,
+        ...("exitCode" in result ? result : { env }),
+        stdout: result.stdout,
+        stderr: `${result.stderr}bash: ${cleanupFailed ? "execution cleanup failed" : "execution aborted"}\n`,
+        exitCode,
+        ...(result.cwd && { cwd: result.cwd }),
       };
     }
-    return commandLine.trim() ? this.logResult(finalResult) : finalResult;
+    if (!("exitCode" in finalResult)) return finalResult;
+    return commandLine.trim() || completion
+      ? this.logResult(finalResult)
+      : finalResult;
   }
 
   private async execInScope(
     commandLine: string,
-    options: ExecOptions | undefined,
+    options: (ExecOptions & { onPlainCommand?: PlainCommandHook }) | undefined,
     executionScope: ExecutionScope,
     execDepth: number,
     parentSignal: AbortSignal | undefined,
     stdinAlreadyAccounted = false,
     shouldLogResult = true,
+    completion?: PlainCommandCompletion,
   ): Promise<BashExecResult> {
     const finishResult = (result: BashExecResult): BashExecResult =>
       shouldLogResult ? this.logResult(result) : result;
@@ -747,7 +860,7 @@ export class Bash {
       // host can constrain any one without unexpectedly disabling the others.
       assertSourceWithinLimit(commandLine, this.limits.maxSourceBytes);
 
-      if (!commandLine.trim()) {
+      if (!commandLine.trim() && !completion) {
         return {
           stdout: "",
           stderr: "",
@@ -849,6 +962,8 @@ export class Bash {
         // Per-exec background hook, never inherited by a nested exec
         onBackground: effectiveOptions.onBackground,
         onStatementBoundary: effectiveOptions.onStatementBoundary,
+        onPlainCommand:
+          execDepth === 0 ? effectiveOptions.onPlainCommand : undefined,
       };
 
       // Seed the exec state from an earlier snapshot. The snapshot env
@@ -918,6 +1033,7 @@ export class Bash {
             commands: this.commands,
             limits: this.limits,
             executionScope,
+            plainCommandCompletion: completion,
             exec: (script, childOptions, childStdinAlreadyAccounted = false) =>
               this.execInScope(
                 script,

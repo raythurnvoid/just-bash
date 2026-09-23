@@ -10,7 +10,12 @@
  * since they use node:zlib. All other commands work.
  */
 
-export type { BashLogger, BashOptions, ExecOptions } from "./Bash.js";
+export type {
+  BashLogger,
+  BashOptions,
+  ExecOptions,
+  PlainCommandExecOptions,
+} from "./Bash.js";
 export { Bash } from "./Bash.js";
 export type {
   AllCommandName,
@@ -52,6 +57,12 @@ export {
 } from "./fs/mountable-fs/index.js";
 export type { InterpreterStateSnapshot } from "./interpreter/state-snapshot.js";
 export type {
+  BashHostSuspension,
+  BashRunOutcome,
+  PlainCommandBoundary,
+  PlainCommandContinuation,
+  PlainCommandHook,
+  PlainCommandResult,
   StatementBoundary,
   StatementBoundaryDecision,
 } from "./interpreter/statement-boundary.js";
