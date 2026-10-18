@@ -97,7 +97,11 @@ export async function handleCd(
         if (!stat.isDirectory) {
           return failure(`bash: cd: ${target}: Not a directory\n`);
         }
-      } catch {
+      } catch (error) {
+        // Like Linux, a path the user cannot open says Permission denied.
+        if ((error as { code?: unknown }).code === "EACCES") {
+          return failure(`bash: cd: ${target}: Permission denied\n`);
+        }
         return failure(`bash: cd: ${target}: No such file or directory\n`);
       }
     }

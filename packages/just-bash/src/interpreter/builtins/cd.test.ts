@@ -1,5 +1,20 @@
 import { describe, expect, it } from "vitest";
 import { Bash } from "../../Bash.js";
+import { InMemoryFs } from "../../fs/in-memory-fs/in-memory-fs.js";
+import type { FsStat } from "../../fs/interface.js";
+
+// The folder /locked can be seen, but every path below it is refused.
+class LockedFs extends InMemoryFs {
+  override async stat(path: string): Promise<FsStat> {
+    if (path.startsWith("/locked/")) {
+      throw Object.assign(
+        new Error(`EACCES: permission denied, stat '${path}'`),
+        { code: "EACCES" },
+      );
+    }
+    return super.stat(path);
+  }
+}
 
 describe("cd builtin", () => {
   describe("basic cd", () => {
@@ -100,6 +115,15 @@ describe("cd builtin", () => {
       await env.exec("touch /tmp/testfile");
       const result = await env.exec("cd /tmp/testfile");
       expect(result.stderr).toContain("Not a directory");
+      expect(result.exitCode).toBe(1);
+    });
+
+    it("should say Permission denied below a folder that cannot be opened", async () => {
+      const fs = new LockedFs();
+      await fs.mkdir("/locked");
+      const env = new Bash({ fs });
+      const result = await env.exec("cd /locked/nope");
+      expect(result.stderr).toBe("bash: cd: /locked/nope: Permission denied\n");
       expect(result.exitCode).toBe(1);
     });
   });
