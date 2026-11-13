@@ -832,14 +832,26 @@ let violations = [];
 let ignoreComments = [];
 
 /**
+ * Give the path with "/" between its parts. Every file and skip pattern in this
+ * script is written with "/". Windows paths use "\", so without this no pattern
+ * matched there: the script linted itself and ran every rule on security modules.
+ * @param {string} path
+ * @returns {string}
+ */
+function toMatchPath(path) {
+  return sep === "/" ? path : path.split(sep).join("/");
+}
+
+/**
  * Check if a file should be skipped
  * @param {string} filePath
  * @returns {boolean}
  */
 function shouldSkipFile(filePath) {
+  const matchPath = toMatchPath(filePath);
   return (
-    SKIP_PATH_PATTERNS.some((pattern) => pattern.test(filePath)) ||
-    SKIP_PATTERNS.some((pattern) => pattern.test(filePath))
+    SKIP_PATH_PATTERNS.some((pattern) => pattern.test(matchPath)) ||
+    SKIP_PATTERNS.some((pattern) => pattern.test(matchPath))
   );
 }
 
@@ -935,7 +947,8 @@ function scanFile(filePath) {
     if (fd !== undefined) closeSync(fd);
   }
   const lines = content.split("\n");
-  const isSecurityModule = /src\/security\//.test(filePath);
+  const matchPath = toMatchPath(filePath);
+  const isSecurityModule = /src\/security\//.test(matchPath);
 
   // First pass: collect all ignore comments in this file
   for (let i = 0; i < lines.length; i++) {
@@ -961,7 +974,7 @@ function scanFile(filePath) {
       if (isSecurityModule && pattern.scanSecurity !== true) {
         continue;
       }
-      if (pattern.filePattern && !pattern.filePattern.test(filePath)) {
+      if (pattern.filePattern && !pattern.filePattern.test(matchPath)) {
         continue;
       }
       // Use a fresh regex for each test to avoid lastIndex issues
@@ -1020,7 +1033,7 @@ function safeRelativePath(path) {
     ? "."
     : rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)
       ? "<outside-root>"
-      : rel;
+      : toMatchPath(rel);
 }
 
 function isWithinRoot(canonicalPath) {
@@ -1077,7 +1090,8 @@ function scanDirectory(dir) {
 
   for (const entry of entries) {
     const fullPath = join(dir, entry);
-    if (SKIP_PATH_PATTERNS.some((pattern) => pattern.test(fullPath))) {
+    const matchPath = toMatchPath(fullPath);
+    if (SKIP_PATH_PATTERNS.some((pattern) => pattern.test(matchPath))) {
       continue;
     }
     let stat;
@@ -1191,7 +1205,7 @@ export function runScanner(scanRoot = process.cwd(), options = {}) {
       );
 
       for (const v of patternViolations) {
-        const relPath = relative(rootDir, v.file);
+        const relPath = toMatchPath(relative(rootDir, v.file));
         console.error(`\x1b[36m${relPath}:${v.line}\x1b[0m`);
         console.error(v.context);
         console.error("");
@@ -1216,7 +1230,7 @@ export function runScanner(scanRoot = process.cwd(), options = {}) {
     );
 
     for (const ignore of unusedIgnores) {
-      const relPath = relative(rootDir, ignore.file);
+      const relPath = toMatchPath(relative(rootDir, ignore.file));
       console.error(`\x1b[36m${relPath}:${ignore.line}\x1b[0m`);
       console.error(`  ${ignore.content}`);
       console.error("");
