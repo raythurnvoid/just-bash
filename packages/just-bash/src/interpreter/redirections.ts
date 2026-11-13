@@ -84,31 +84,6 @@ async function checkOutputRedirectTarget(
   return null;
 }
 
-/**
- * Determine the encoding to use for file I/O.
- * If all character codes are <= 127 (ASCII), use binary encoding (byte data).
- * Otherwise, use UTF-8 encoding (text with non-ASCII characters).
- * For performance, only check the first 8KB of large strings.
- *
- * Characters in the 128-255 range (e.g. Latin-1: Ü Ö Ä é è) need UTF-8
- * encoding because their multi-byte UTF-8 representation would be lost
- * if stored as single bytes via binary encoding.
- */
-function getFileEncoding(content: string): "binary" | "utf8" {
-  const SAMPLE_SIZE = 8192; // 8KB
-
-  // For large strings, only check the first 8KB
-  // This is sufficient since UTF-8 files typically have Unicode chars early
-  const checkLength = Math.min(content.length, SAMPLE_SIZE);
-
-  for (let i = 0; i < checkLength; i++) {
-    if (content.charCodeAt(i) > 127) {
-      return "utf8";
-    }
-  }
-  return "binary";
-}
-
 /** Expanded targets keyed by their position in the original redirection list. */
 export type ExpandedRedirectTargets = Map<number, string>;
 
@@ -247,7 +222,7 @@ async function readInputEntry(
 ): Promise<{ entry?: FdEntry; error?: ExecResult }> {
   const filePath = ctx.fs.resolvePath(ctx.state.cwd, target);
   try {
-    const content = await ctx.fs.readFile(filePath);
+    const content = latin1FromBytes(await readBytesFrom(ctx.fs, filePath));
     return readwrite
       ? {
           entry: {
@@ -426,7 +401,9 @@ async function prepareRedirectionsWithState(
     const effectiveFd = effectiveRedirectFd(redir);
 
     if (redir.target.type === "HereDoc") {
-      const content = await hereDocContent(ctx, redir.target);
+      const content = latin1FromBytes(
+        encodeUtf8ToBytes(await hereDocContent(ctx, redir.target)),
+      );
       if (redir.fdVariable) {
         try {
           checkReadonlyError(ctx, redir.fdVariable);
@@ -457,7 +434,7 @@ async function prepareRedirectionsWithState(
         rememberFd(ctx, snapshot, effectiveFd);
         setFdEntry(ctx, effectiveFd, { kind: "input", content });
       } else if (effectiveFd === 0 || effectiveFd === null) {
-        stdin = latin1FromBytes(encodeUtf8ToBytes(content));
+        stdin = content;
         stdinSourceFd = -1;
         persistStandard(effectiveFd, { kind: "input", content: stdin });
       } else {
@@ -616,7 +593,10 @@ async function prepareRedirectionsWithState(
         if (opened.error) return fail(opened.error, index);
         entry = opened.entry;
       } else if (redir.operator === "<<<") {
-        entry = { kind: "input", content: `${target}\n` };
+        entry = {
+          kind: "input",
+          content: latin1FromBytes(encodeUtf8ToBytes(`${target}\n`)),
+        };
       } else if (redir.operator === "<" || redir.operator === "<>") {
         const opened = await readInputEntry(
           ctx,
@@ -761,7 +741,10 @@ async function prepareRedirectionsWithState(
         if (opened.error) return fail(opened.error, index);
         setFdEntry(ctx, fd, opened.entry as FdEntry);
       } else if (redir.operator === "<<<") {
-        setFdEntry(ctx, fd, { kind: "input", content: `${target}\n` });
+        setFdEntry(ctx, fd, {
+          kind: "input",
+          content: latin1FromBytes(encodeUtf8ToBytes(`${target}\n`)),
+        });
       } else if (redir.operator === "<" || redir.operator === "<>") {
         const opened = await readInputEntry(
           ctx,
@@ -1393,7 +1376,12 @@ export async function applyRedirections(
       // is not recorded anywhere in the interpreter. This matches the
       // convention of the live-stream merge (`stdout += stderr`) used for a
       // bare `2>&1`.
-      const combined = pendingStdout + pendingStderr;
+      // stderr is text even when stdout carries raw bytes.
+      const combined =
+        pendingStdout +
+        (stdoutIsBytes
+          ? latin1FromBytes(encodeUtf8ToBytes(pendingStderr))
+          : pendingStderr);
       if (combined !== "") {
         if (fd1Sink.kind === "file") {
           await deliverToFile(fd1Sink, combined, getStdoutEncoding(combined));
@@ -1417,16 +1405,34 @@ export async function applyRedirections(
         }
         switch (sink.kind) {
           case "live-stdout":
-            stdout += content;
+            stdout +=
+              !isStdout && stdoutIsBytes
+                ? latin1FromBytes(encodeUtf8ToBytes(content))
+                : content;
             break;
           case "live-stderr":
-            stderr += content;
+            if (isStdout && stdoutIsBytes) {
+              // stderr is text; keep a leading BOM as content.
+              const bytes = Uint8Array.from(content, (char) =>
+                char.charCodeAt(0),
+              );
+              try {
+                stderr += new TextDecoder("utf-8", {
+                  fatal: true,
+                  ignoreBOM: true,
+                }).decode(bytes);
+              } catch {
+                stderr += content;
+              }
+            } else {
+              stderr += content;
+            }
             break;
           case "file":
             await deliverToFile(
               sink,
               content,
-              isStdout ? getStdoutEncoding(content) : getFileEncoding(content),
+              isStdout ? getStdoutEncoding(content) : "utf8",
             );
             break;
           case "descriptor":
@@ -1435,7 +1441,7 @@ export async function applyRedirections(
               sink.source.entry,
               sink.source.descriptors,
               content,
-              isStdout ? getStdoutEncoding(content) : getFileEncoding(content),
+              isStdout ? getStdoutEncoding(content) : "utf8",
             );
             break;
           case "invalid-output":

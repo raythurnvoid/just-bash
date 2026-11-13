@@ -16,6 +16,8 @@ import { checkReadonlyError } from "../helpers/readonly.js";
 import { result } from "../helpers/result.js";
 import type { InterpreterContext } from "../types.js";
 
+const readDecoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+
 export function handleRead(
   ctx: InterpreterContext,
   args: string[],
@@ -271,6 +273,34 @@ export function handleRead(
     effectiveStdin = ctx.state.groupStdin;
   }
 
+  // Decode only the character being read, never the untouched input tail.
+  const inputBytes = new Uint8Array(4);
+  const readCharacter = (position: number): { char: string; bytes: number } => {
+    const first = effectiveStdin.charCodeAt(position);
+    const bytes =
+      first >= 0xc2 && first <= 0xdf
+        ? 2
+        : first >= 0xe0 && first <= 0xef
+          ? 3
+          : first >= 0xf0 && first <= 0xf4
+            ? 4
+            : 1;
+    if (bytes > 1 && position + bytes <= effectiveStdin.length) {
+      for (let index = 0; index < bytes; index++) {
+        inputBytes[index] = effectiveStdin.charCodeAt(position + index);
+      }
+      try {
+        return {
+          char: readDecoder.decode(inputBytes.subarray(0, bytes)),
+          bytes,
+        };
+      } catch {
+        // Invalid UTF-8 keeps the original one-byte character.
+      }
+    }
+    return { char: effectiveStdin[position], bytes: 1 };
+  };
+
   // Handle -d '' (empty delimiter) - reads until NUL byte
   // Empty string delimiter means read until NUL byte (\0)
   const effectiveDelimiter = delimiter === "" ? "\0" : delimiter;
@@ -288,14 +318,6 @@ export function handleRead(
     }
     line += value;
     lineBytes += bytes;
-  };
-  const assertLineLimit = (value: string): void => {
-    if (utf8ByteLength(value) > ctx.limits.maxStringLength) {
-      throw new ExecutionLimitError(
-        `read: string length limit exceeded (${ctx.limits.maxStringLength} bytes)`,
-        "string_length",
-      );
-    }
   };
   let consumed = 0;
   let foundDelimiter = true; // Assume found unless no newline at end
@@ -319,11 +341,14 @@ export function handleRead(
 
   if (ncharsExact >= 0) {
     // -N: Read exactly N characters (ignores delimiters, no IFS splitting)
-    const toRead = Math.min(ncharsExact, effectiveStdin.length);
-    line = effectiveStdin.substring(0, toRead);
-    assertLineLimit(line);
-    consumed = toRead;
-    foundDelimiter = toRead >= ncharsExact;
+    let charCount = 0;
+    while (consumed < effectiveStdin.length && charCount < ncharsExact) {
+      const { char, bytes } = readCharacter(consumed);
+      appendLine(char);
+      consumed += bytes;
+      charCount++;
+    }
+    foundDelimiter = charCount >= ncharsExact;
 
     // Consume from appropriate source
     consumeInput(consumed);
@@ -343,16 +368,18 @@ export function handleRead(
     let inputPos = 0;
     let hitDelimiter = false;
     while (inputPos < effectiveStdin.length && charCount < nchars) {
-      const char = effectiveStdin[inputPos];
+      const { char, bytes } = readCharacter(inputPos);
       if (char === effectiveDelimiter) {
-        consumed = inputPos + 1;
+        consumed = inputPos + bytes;
         hitDelimiter = true;
         break;
       }
       if (!raw && char === "\\" && inputPos + 1 < effectiveStdin.length) {
         // Backslash escape: consume both chars, but only count as 1 char
         // The escaped character is kept, backslash is removed
-        const nextChar = effectiveStdin[inputPos + 1];
+        const { char: nextChar, bytes: nextBytes } = readCharacter(
+          inputPos + 1,
+        );
         if (nextChar === effectiveDelimiter && effectiveDelimiter === "\n") {
           // Backslash-newline is a line continuation: consume both, don't count as a char
           // Continue reading from the next line
@@ -362,19 +389,19 @@ export function handleRead(
         }
         if (nextChar === effectiveDelimiter) {
           // Backslash-delimiter (non-newline): counts as one char (the escaped delimiter)
-          inputPos += 2;
+          inputPos += 1 + nextBytes;
           charCount++;
           appendLine(nextChar);
           consumed = inputPos;
           continue;
         }
         appendLine(nextChar);
-        inputPos += 2;
+        inputPos += 1 + nextBytes;
         charCount++;
         consumed = inputPos;
       } else {
         appendLine(char);
-        inputPos++;
+        inputPos += bytes;
         charCount++;
         consumed = inputPos;
       }
@@ -392,18 +419,20 @@ export function handleRead(
     let inputPos = 0;
 
     while (inputPos < effectiveStdin.length) {
-      const char = effectiveStdin[inputPos];
+      const { char, bytes } = readCharacter(inputPos);
 
       // Check for delimiter
       if (char === effectiveDelimiter) {
-        consumed = inputPos + effectiveDelimiter.length;
+        consumed = inputPos + bytes;
         foundDelimiter = true;
         break;
       }
 
       // In non-raw mode, handle backslash escapes
       if (!raw && char === "\\" && inputPos + 1 < effectiveStdin.length) {
-        const nextChar = effectiveStdin[inputPos + 1];
+        const { char: nextChar, bytes: nextBytes } = readCharacter(
+          inputPos + 1,
+        );
 
         if (nextChar === "\n") {
           // Backslash-newline is line continuation: skip both, regardless of delimiter
@@ -414,19 +443,19 @@ export function handleRead(
         if (nextChar === effectiveDelimiter) {
           // Backslash-delimiter: escape the delimiter, include it literally
           appendLine(nextChar);
-          inputPos += 2;
+          inputPos += 1 + nextBytes;
           continue;
         }
 
         // Other backslash escapes: keep both for now (will be processed later)
         appendLine(char);
         appendLine(nextChar);
-        inputPos += 2;
+        inputPos += 1 + nextBytes;
         continue;
       }
 
       appendLine(char);
-      inputPos++;
+      inputPos += bytes;
     }
 
     // If we exited the loop without finding a delimiter, we consumed everything

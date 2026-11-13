@@ -116,6 +116,44 @@ describe("byte/text pipeline contract", () => {
   });
 
   describe("here-docs / here-strings → byte consumer", () => {
+    it.each([
+      "cat <<'EOF' > /out\nTEXT\nEOF",
+      "cat 3<<'EOF' <&3 > /out\nTEXT\nEOF",
+      ": {input}<<'EOF'\nTEXT\nEOF\ncat <&$input > /out",
+      "cat <<< 'TEXT' > /out",
+      "cat 3<<< 'TEXT' <&3 > /out",
+      ": {input}<<< 'TEXT'; cat <&$input > /out",
+    ])("keeps UTF-8 bytes through %s", async (script) => {
+      const env = new Bash();
+      const text = "café — 日本語 😀";
+      const result = await env.exec(script.replace("TEXT", text));
+      expect(result.exitCode).toBe(0);
+      expect(result.stderr).toBe("");
+      expect(Array.from(await env.fs.readFileBuffer("/out"))).toEqual(
+        Array.from(new TextEncoder().encode(`${text}\n`)),
+      );
+    });
+
+    it.each([
+      "3< /in",
+      "3<> /in",
+      "{input}< /in",
+      "{input}<> /in",
+    ])("keeps raw file bytes through %s", async (redirect) => {
+      const bytes = new Uint8Array([0x80, 0xff, 0, 0xc3, 0xa9]);
+      const env = new Bash({ files: { "/in": bytes } });
+      const fd = redirect.startsWith("3") ? "3" : "$input";
+      const opener = redirect.startsWith("3") ? "exec" : ":";
+      const result = await env.exec(
+        `${opener} ${redirect}; cat <&${fd} > /out`,
+      );
+      expect(result.exitCode).toBe(0);
+      expect(result.stderr).toBe("");
+      expect(Array.from(await env.fs.readFileBuffer("/out"))).toEqual(
+        Array.from(bytes),
+      );
+    });
+
     it("heredoc with non-ASCII text pipes as UTF-8 bytes", async () => {
       const env = new Bash();
       const r = await env.exec(`wc -c <<EOF
@@ -130,6 +168,51 @@ EOF`);
       const r = await env.exec(`wc -c <<< "한"`);
       expect(r.stdout.trim()).toBe("4");
     });
+  });
+
+  it.each([
+    "> /out 2>&1",
+    "&> /out",
+    "2>&1 | cat > /out",
+  ])("encodes text stderr when joining byte stdout with %s", async (redirect) => {
+    const env = new Bash({ files: { "/in": "café —\n" } });
+    await env.exec(`cat /in /missing-é ${redirect}`);
+    expect(Array.from(await env.fs.readFileBuffer("/out"))).toEqual(
+      Array.from(
+        new TextEncoder().encode(
+          "café —\ncat: /missing-é: No such file or directory\n",
+        ),
+      ),
+    );
+  });
+
+  it("writes text and bytes at the shared read-write offset", async () => {
+    const env = new Bash({
+      files: { "/in": "abcdef—尾\n", "/byte": new Uint8Array([0xff]) },
+    });
+    const result = await env.exec(
+      "exec 3<> /in; printf 'é' >&3; cat /byte >&3; printf '😀' >&3",
+    );
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).toBe("");
+    const original = new TextEncoder().encode("abcdef—尾\n");
+    const expected = new Uint8Array(original);
+    expected.set(new TextEncoder().encode("é"), 0);
+    expected[2] = 0xff;
+    expected.set(new TextEncoder().encode("😀"), 3);
+    expect(Array.from(await env.fs.readFileBuffer("/in"))).toEqual(
+      Array.from(expected),
+    );
+  });
+
+  it("keeps a leading BOM when byte stdout reaches a parent stderr file", async () => {
+    const text = `${String.fromCharCode(0xfeff)}café —\n`;
+    const env = new Bash({ files: { "/in": text } });
+    const result = await env.exec("{ cat /in >&2; } 2> /out");
+    expect(result.exitCode).toBe(0);
+    expect(Array.from(await env.fs.readFileBuffer("/out"))).toEqual(
+      Array.from(new TextEncoder().encode(text)),
+    );
   });
 
   describe("`bash -c`, sh, functions, groups, subshells preserve stdin", () => {
